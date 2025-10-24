@@ -4,6 +4,7 @@ import json
 import logging
 import datetime
 from vllm import LLM, SamplingParams, model_executor
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from unittest.mock import patch
 from typing import Tuple, Any, List, Dict
 from collections.abc import Callable
@@ -12,8 +13,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 def init_vllm(model: str,
               device: str | torch.device | None = "cuda:0",
               gpu_memory_utilization: float = 0.9,
-            #   dtype: torch.dtype | None = torch.bfloat16,
-              dtype: torch.dtype | None = torch.float16,
+              dtype: torch.dtype | None = torch.bfloat16,
+            #   dtype: torch.dtype | None = torch.float16,
               seed: int = 4096) -> LLM:
     model_executor.set_random_seed(seed)
     # world_size_patch = patch("torch.distributed.get_world_size", return_value=1)
@@ -163,3 +164,27 @@ def calculate_metrics(
         for line in example_list:
             f.write(line + "\n\n")
     return metric_dict
+
+
+def load_model(
+    model_id: str = "Qwen/Qwen2.5-Math-1.5B",
+    cache_dir: str | os.PathLike = "models/ii/" 
+) -> None:
+    logging.info(f"Loading tokenizer for {model_id}...")
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_id,
+            cache_dir=cache_dir 
+        )
+
+        logging.info(f"Loading model {model_id}...")
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            cache_dir=cache_dir
+        )
+        print("Model loaded.")
+
+    except Exception as e:
+        logging.error(e)
