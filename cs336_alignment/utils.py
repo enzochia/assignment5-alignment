@@ -4,7 +4,7 @@ import json
 import logging
 import datetime
 from vllm import LLM, SamplingParams, model_executor
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizer
 from unittest.mock import patch
 from typing import Tuple, Any, List, Dict
 from collections.abc import Callable
@@ -168,7 +168,7 @@ def calculate_metrics(
 
 def load_model(
     model_id: str = "Qwen/Qwen2.5-Math-1.5B",
-    cache_dir: str | os.PathLike = "models/ii/" 
+    cache_dir: str | os.PathLike = "models/bf16/" 
 ) -> None:
     logging.info(f"Loading tokenizer for {model_id}...")
     try:
@@ -181,10 +181,57 @@ def load_model(
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
             torch_dtype=torch.bfloat16,
-            device_map="auto",
+            attn_implementation="flash_attention_2",
             cache_dir=cache_dir
         )
         print("Model loaded.")
 
     except Exception as e:
         logging.error(e)
+
+
+def tokenize_prompt_and_output(
+    prompt_strs: List[str], 
+    output_strs: List[str], 
+    tokenizer: PreTrainedTokenizer,
+    device: str | torch.device | None = "cuda",
+):
+    """Tokenize the prompt and output strings, and construct a mask that is 1
+    for the response tokens and 0 for other tokens (prompt or padding).
+
+    Args:
+        prompt_strs: list[str], the prompt strings.
+        output_strs: list[str], the output strings.
+        tokenizer: PreTrainedTokenizer, the tokenizer to use.
+
+    Returns:
+        dict[str, torch.Tensor]:
+            "input_ids": torch.Tensor of shape (batch_size, max(prompt_and_output_lens) - 1):
+                the tokenized prompt and output strings, with the final token sliced off.
+            "labels": torch.Tensor of shape (batch_size, max(prompt_and_output_lens) - 1):
+                shifted input_ids (i.e., the input_ids without the first token).
+            "response_mask": torch.Tensor of shape (batch_size, max(prompt_and_output_lens) - 1):
+                a mask on the response tokens in `labels`.
+    """
+    bs = len(prompt_strs)
+    prompts_tokenized = [tokenizer.encode(p) for p in prompt_strs]
+    outputs_tokenized = [tokenizer.encode(o) for o in output_strs]
+    max_seq_len = max(len(p) + len(o) for p, o in zip(prompts_tokenized, outputs_tokenized))
+
+    input_ids = torch.full((bs, max_seq_len), tokenizer.pad_token_id, device=device)
+    labels = torch.full((bs, max_seq_len - 1), tokenizer.pad_token_id, device=device)
+    response_mask = torch.zeros((bs, max_seq_len - 1), dtype=torch.bool, device=device)
+
+    for idx_seq in range(bs):
+        seq = prompts_tokenized[idx_seq] + outputs_tokenized[idx_seq]
+        input_ids[idx_seq, :len(seq)] = torch.tensor(seq, device=device, dtype=torch.long)
+        labels[idx_seq, :(len(seq) - 1)] = torch.tensor(seq[1:], device=device, dtype=torch.long)
+        response_mask[idx_seq, (len(prompts_tokenized[idx_seq]) - 1):(len(seq) - 1)] = True
+    input_ids = input_ids[:, :-1]
+
+    data_dict = {
+        "input_ids": input_ids,
+        "labels": labels,
+        "response_mask": response_mask
+    }
+    return data_dict
