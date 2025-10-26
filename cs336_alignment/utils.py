@@ -19,7 +19,6 @@ def init_vllm(model: str,
               device: str | torch.device | None = "cuda:0",
               gpu_memory_utilization: float = 0.9,
               dtype: torch.dtype | None = torch.bfloat16,
-            #   dtype: torch.dtype | None = torch.float16,
               seed: int = 4096) -> LLM:
     model_executor.set_random_seed(seed)
     # world_size_patch = patch("torch.distributed.get_world_size", return_value=1)
@@ -173,6 +172,7 @@ def calculate_metrics(
 
 def load_model(
     model_id: str = "Qwen/Qwen2.5-Math-1.5B",
+    torch_dtype: torch.dtype | None = torch.bfloat16,
     cache_dir: str | os.PathLike = "models/bf16/" 
 ) -> None:
     logging.info(f"Loading tokenizer for {model_id}...")
@@ -185,7 +185,7 @@ def load_model(
         logging.info(f"Loading model {model_id}...")
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=torch_dtype,
             attn_implementation="flash_attention_2",
             cache_dir=cache_dir
         )
@@ -401,7 +401,7 @@ def log_generations(
 
     outputs = [r["generated_text"] for r in results]
     rewards = [r["reward"] for r in results]
-    # rewards = torch.tensor(rewards, device=device)
+    rewards = torch.tensor(rewards, device=device)
     count_correct_format = sum(r["format_reward"] for r in results)
     count_correct_answer = sum(r["answer_reward"] for r in results)
     count_reward = sum(r["reward"] for r in results)
@@ -430,9 +430,9 @@ def log_generations(
         normalize_constant=token_dict["response_mask"].sum()
     )
     response_len = token_dict["response_mask"].sum(dim=-1)
-    avg_response_len = response_len.mean()
-    avg_correct_response_len = response_len[rewards > 0.5].mean()
-    avg_incorrect_response_len = response_len[rewardss < 0.5].mean()
+    avg_response_len = response_len.float().mean()
+    avg_correct_response_len = response_len[rewards > 0.5].float().mean()
+    avg_incorrect_response_len = response_len[rewards < 0.5].float().mean()
 
     metric_dict = {
         "step": step,
@@ -440,10 +440,10 @@ def log_generations(
         "count_correct_format": count_correct_format,
         "count_correct_answer": count_correct_answer,
         "total_reward": count_reward,
-        "avg_token_entropy": avg_token_entropy,
-        "avg_response_len": avg_response_len,
-        "avg_correct_response_len": avg_correct_response_len,
-        "avg_incorrect_response_len": avg_incorrect_response_len
+        "avg_token_entropy": avg_token_entropy.item(),
+        "avg_response_len": avg_response_len.item(),
+        "avg_correct_response_len": avg_correct_response_len.item(),
+        "avg_incorrect_response_len": avg_incorrect_response_len.item()
     }
     if log_to is not None:
         metric_path = os.path.join(log_to, f"eval_metrics_step_{step}.json")
@@ -455,6 +455,7 @@ def log_generations(
         text_path = os.path.join(log_to, f"eval_texts_step_{step}.json")
         with open(text_path, "w") as f:
             for line in results:
-                f.write(line + "\n\n")
+                json.dump(line, f)
+                f.write("\n\n")
 
     return metric_dict

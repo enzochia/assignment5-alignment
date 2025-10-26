@@ -18,7 +18,10 @@ from cs336_alignment.drgrpo_grader import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 if __name__ == "__main__":
-    # load_model()
+    # _, _ = load_model(
+    #     model_id=args.model, 
+    #     torch_dtype=torch.bfloat16
+    # )
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="models/Qwen2.5-Math-1.5B")
     parser.add_argument("--data", type=str, default="MATH", choices=["MATH", "gsm8k"])
@@ -37,7 +40,12 @@ if __name__ == "__main__":
     prompt_template_path_dict = {"r1_zero": "cs336_alignment/prompts/r1_zero.prompt",
                                  "question_only": "cs336_alignment/prompts/question_only.prompt"}
 
-    model = init_vllm(model=args.model, device=args.device)
+    model = init_vllm(
+        model=args.model, 
+        device=args.device, 
+        gpu_memory_utilization=0.48, 
+        dtype=torch.bfloat16
+    )
     sampling_params = SamplingParams(
         temperature=args.temperature,
         top_k=args.top_k,

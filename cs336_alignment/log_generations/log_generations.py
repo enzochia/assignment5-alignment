@@ -37,10 +37,19 @@ if __name__ == "__main__":
     prompt_template_path_dict = {"r1_zero": "cs336_alignment/prompts/r1_zero.prompt",
                                  "question_only": "cs336_alignment/prompts/question_only.prompt"}
 
-    tokenizer, model = load_model(model_id=args.model, cache_dir=None)
+    tokenizer, model = load_model(
+        model_id=args.model, 
+        torch_dtype=torch.bfloat16, 
+        cache_dir=None
+    )
     model = model.to(args.device)
 
-    model_vllm = init_vllm(model=args.model, device=args.device)
+    model_vllm = init_vllm(
+        model=args.model, 
+        device=args.device, 
+        gpu_memory_utilization=0.48, 
+        dtype=torch.bfloat16
+    )
     sampling_params = SamplingParams(
         temperature=args.temperature,
         top_k=args.top_k,
@@ -49,12 +58,10 @@ if __name__ == "__main__":
         include_stop_str_in_output=True
     )
 
-
     questions, answers = load_eval_data(data_name=args.data, path=args.data_path)
     reward_fn = r1_zero_reward_fn if args.reward == "r1_zero" else question_only_reward_fn
     prompt_template = load_prompt_template(prompt_template_path_dict[args.reward])
     prompts = [prompt_template.format(question=q) for q in questions]
-
 
     metric_dict = log_generations(
         tokenizer=tokenizer,
