@@ -3,11 +3,16 @@ import torch
 import json
 import logging
 import datetime
+from tqdm import tqdm
 from vllm import LLM, SamplingParams, model_executor
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizer, PreTrainedModel
 from unittest.mock import patch
 from typing import Tuple, Any, List, Dict
 from collections.abc import Callable
+from .drgrpo_grader import (
+    r1_zero_reward_fn,
+    question_only_reward_fn
+)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 def init_vllm(model: str,
@@ -188,6 +193,7 @@ def load_model(
 
     except Exception as e:
         logging.error(e)
+    return tokenizer, model
 
 
 def tokenize_prompt_and_output(
@@ -235,3 +241,220 @@ def tokenize_prompt_and_output(
         "response_mask": response_mask
     }
     return data_dict
+
+
+def _logsumexp(logits: torch.Tensor) -> torch.Tensor:
+
+    max_logit = torch.max(logits, dim=-1, keepdim=True)[0]
+    logits = logits - max_logit
+    return max_logit + torch.log(torch.sum(torch.exp(logits), dim=-1, keepdim=True))
+
+def compute_entropy(logits: torch.Tensor) -> torch.Tensor:
+    """
+    Get the entropy of the next-token predictions (i.e., entropy over the vocabulary dimension).
+    Args:
+        logits: torch.Tensor Tensor of shape (batch_size, sequence_length, vocab_size)
+        containing unnormalized logits.
+    Returns:
+        torch.Tensor: Shape (batch_size, sequence_length). The entropy for each next-token
+        prediction.
+    """
+    log_prob = logits - _logsumexp(logits)
+    return -(log_prob * torch.exp(log_prob)).sum(dim=-1, keepdim=False)
+
+
+def get_response_log_probs(
+    model: PreTrainedModel,
+    input_ids: torch.Tensor,
+    labels: torch.Tensor,
+    return_token_entropy: bool = False
+) -> dict[str, torch.Tensor]:
+    """Get the conditional log-probs of the response given the prompt,
+        and optionally the entropy of the next token predictions.
+
+    Args:
+        model: PreTrainedModel, the model to score.
+        input_ids: torch.Tensor of shape (batch_size, sequence_length):
+            the tokenized prompt and output.
+        labels: torch.Tensor of shape (batch_size, sequence_length):
+            shifted input_ids.
+        return_token_entropy: bool, whether to return the entropy of the
+            next token predictions.
+
+    Returns:
+        dict[str, torch.Tensor]:
+            "log_probs": torch.Tensor of shape (batch_size, sequence_length):
+                the conditional log-probs of the response given the prompt.
+                Note that we have not masked out the token indices corresponding
+                to the prompt or padding; that is done in the train loop.
+            "token_entropy": Optional[torch.Tensor] of shape (batch_size, sequence_length):
+                the entropy of the next token predictions. As with the log-probs,
+                we have not masked out the token indices corresponding to the prompt
+                or padding; that is done in the train loop.
+    """
+    # [..., seq_len, vocab_size]
+    logits = model(input_ids).logits
+    # [..., seq_len, 1]
+    log_probs = torch.gather(logits, dim=-1, index=labels.unsqueeze(-1)) - \
+                _logsumexp(logits)
+    result_dict = {
+            "log_probs": log_probs.squeeze(-1)
+        }
+    if return_token_entropy:
+        result_dict["token_entropy"] = compute_entropy(logits)
+    return result_dict
+
+
+def masked_normalize(
+    tensor: torch.Tensor,
+    mask: torch.Tensor,
+    normalize_constant: float,
+    dim: int | None= None
+) -> torch.Tensor:
+    """Sum over a dimension and normalize by a constant,
+    considering only the elements with mask value 1.
+
+    Args:
+        tensor: torch.Tensor, the tensor to sum and normalize.
+        mask: torch.Tensor, the mask. We only consider elements
+            with mask value 1.
+        dim: int | None, the dimension to sum along before
+            normalization. If None, sum over all dimensions.
+        normalize_constant: float, the constant to divide by
+            for normalization.
+
+    Returns:
+        torch.Tensor, the normalized sum, where masked elements
+            (mask=0) don't contribute to the sum.
+    """
+    tensor_masked = tensor.masked_fill(mask.logical_not(), 0)
+    tensor_sum = tensor_masked.sum(dim=dim)
+    return tensor_sum / normalize_constant
+
+
+def sft_microbatch_train_step(
+    policy_log_probs: torch.Tensor,
+    response_mask: torch.Tensor,
+    gradient_accumulation_steps: int,
+    normalize_constant: float = 1.0
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """
+    Execute a forward-and-backward pass on a microbatch.
+    Args:
+        policy_log_probs (batch_size, sequence_length), per-token log-probabilities from the
+            SFT policy being trained.
+        response_mask (batch_size, sequence_length), 1 for response tokens, 0 for
+            prompt/padding.
+        gradient_accumulation_steps Number of microbatches per optimizer step.
+        normalize_constant The constant by which to divide the sum. It is fine to leave this as 1.0.
+    Returns:
+        tuple[torch.Tensor, dict[str, torch.Tensor]].
+            loss scalar tensor. The microbatch loss, adjusted for gradient accumulation. We return
+                this so we can log it.
+            metadata Dict with metadata from the underlying loss call, and any other statistics you
+                might want to log.
+    """
+    loss = -masked_normalize(
+        tensor=policy_log_probs, 
+        mask=response_mask,
+        normalize_constant=normalize_constant,
+        dim=-1
+    )
+    loss = loss.mean() / gradient_accumulation_steps
+    loss.backward()
+    return loss, {"metadata": None}
+
+
+def log_generations(
+    tokenizer: PreTrainedTokenizer,
+    model_vllm: LLM,
+    model: PreTrainedModel,
+    prompts: List[str],
+    answers: List[str],
+    step: int,
+    sampling_params: SamplingParams = None,
+    log_to: str | os.PathLike | None = None,
+    device: str | torch.device | None = "cuda",
+    reward: str = "r1_zero",
+    temperature: float = 1.0,
+    top_k: float = 1.0,
+    max_tokens: int = 1024,
+    eval_batch_size: int = 4
+) -> Dict[str, Any]:
+    if sampling_params is None:
+        sampling_params = SamplingParams(
+            temperature=temperature,
+            top_k=top_k,
+            max_tokens=max_tokens,
+            stop=["</answer>"],
+            include_stop_str_in_output=True
+        )
+    reward_fn = r1_zero_reward_fn if reward == "r1_zero" else question_only_reward_fn
+    timestamp_str, results = evaluate_vllm(
+        vllm_model=model_vllm,
+        reward_fn=reward_fn,
+        prompts=prompts,
+        eval_sampling_params=sampling_params,
+        answers=answers,
+        save_to=None
+    )
+
+    outputs = [r["generated_text"] for r in results]
+    rewards = [r["reward"] for r in results]
+    # rewards = torch.tensor(rewards, device=device)
+    count_correct_format = sum(r["format_reward"] for r in results)
+    count_correct_answer = sum(r["answer_reward"] for r in results)
+    count_reward = sum(r["reward"] for r in results)
+    token_dict = tokenize_prompt_and_output(prompts, outputs, tokenizer, device)
+
+    log_prob_list = []
+    token_entropy_list = []
+    for idx in tqdm(range(0, len(prompts), eval_batch_size)):
+        input_ids = token_dict["input_ids"][idx:(idx + eval_batch_size)]
+        labels = token_dict["labels"][idx:(idx + eval_batch_size)]
+        with torch.no_grad():
+            log_prob_dict = get_response_log_probs(
+                model=model,
+                input_ids=input_ids,
+                labels=labels,
+                return_token_entropy=True
+            )
+        log_prob_list.append(log_prob_dict["log_probs"])
+        token_entropy_list.append(log_prob_dict["token_entropy"])
+    log_probs = torch.cat(log_prob_list, dim=0).to(device)
+    token_entropies = torch.cat(token_entropy_list, dim=0).to(device)
+
+    avg_token_entropy = masked_normalize(
+        tensor=token_entropies,
+        mask=token_dict["response_mask"],
+        normalize_constant=token_dict["response_mask"].sum()
+    )
+    response_len = token_dict["response_mask"].sum(dim=-1)
+    avg_response_len = response_len.mean()
+    avg_correct_response_len = response_len[rewards > 0.5].mean()
+    avg_incorrect_response_len = response_len[rewardss < 0.5].mean()
+
+    metric_dict = {
+        "step": step,
+        "eval_sample_size": len(prompts),
+        "count_correct_format": count_correct_format,
+        "count_correct_answer": count_correct_answer,
+        "total_reward": count_reward,
+        "avg_token_entropy": avg_token_entropy,
+        "avg_response_len": avg_response_len,
+        "avg_correct_response_len": avg_correct_response_len,
+        "avg_incorrect_response_len": avg_incorrect_response_len
+    }
+    if log_to is not None:
+        metric_path = os.path.join(log_to, f"eval_metrics_step_{step}.json")
+        if not os.path.exists(log_to):
+            os.makedirs(log_to)
+        with open(metric_path, "w") as f:
+            json.dump(metric_dict, f)
+
+        text_path = os.path.join(log_to, f"eval_texts_step_{step}.json")
+        with open(text_path, "w") as f:
+            for line in results:
+                f.write(line + "\n\n")
+
+    return metric_dict
