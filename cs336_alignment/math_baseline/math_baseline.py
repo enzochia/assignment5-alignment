@@ -19,7 +19,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 if __name__ == "__main__":
     # _, _ = load_model(
-    #     model_id=args.model, 
     #     torch_dtype=torch.bfloat16
     # )
     parser = argparse.ArgumentParser()
@@ -30,7 +29,7 @@ if __name__ == "__main__":
     parser.add_argument("--reward", type=str, default="r1_zero", choices=["r1_zero", "question_only"])
     parser.add_argument("--save_to", type=str, default="outputs/math_baseline/")
     parser.add_argument("--temperature", type=float, default=1)
-    parser.add_argument("--top_k", type=float, default=1)
+    parser.add_argument("--top_p", type=float, default=1)
     parser.add_argument("--max_tokens", type=float, default=1024)
     parser.add_argument("--stop", type=str, default="</answer>")
     parser.add_argument("--do_not_include_str_in_output", action="store_false")
@@ -48,7 +47,7 @@ if __name__ == "__main__":
     )
     sampling_params = SamplingParams(
         temperature=args.temperature,
-        top_k=args.top_k,
+        top_p=args.top_p,
         max_tokens=args.max_tokens,
         stop=["</answer>"],
         include_stop_str_in_output=True

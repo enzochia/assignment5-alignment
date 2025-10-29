@@ -1,0 +1,15 @@
+uv run --active -m cs336_alignment.sft.run_sft \
+  --model_path models/bf16/models--Qwen--Qwen2.5-Math-1.5B/snapshots/4a83ca6e4526a4f2da3aa259ec36c259f66b2ab2/ \
+  --data_sft_path data/MATH/sft.jsonl \
+  --data_eval_path data/MATH/validation.jsonl \
+  --prompt r1_zero \
+  --train_device cuda:0 \
+  --eval_device cuda:0 \
+  --checkpoint_dir outputs/ckpt/ \
+  --log_dir outputs/logs/ \
+  --lr_scheduler cosine_with_min_lr \
+  --lr 0.00004 \
+  --batch_size 16 \
+  --gradient_accumulation_steps 16 \
+  --num_epochs 2 \
+  --do_eval

@@ -1,37 +1,62 @@
 import os
 import torch
+import math
 import json
 import logging
 import datetime
+import random
+import numpy as np
 from tqdm import tqdm
 from vllm import LLM, SamplingParams, model_executor
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizer, PreTrainedModel
 from unittest.mock import patch
 from typing import Tuple, Any, List, Dict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from .drgrpo_grader import (
     r1_zero_reward_fn,
     question_only_reward_fn
 )
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-def init_vllm(model: str,
-              device: str | torch.device | None = "cuda:0",
-              gpu_memory_utilization: float = 0.9,
-              dtype: torch.dtype | None = torch.bfloat16,
-              seed: int = 4096) -> LLM:
+def init_vllm(
+    model: str,
+    device: str | torch.device | None = "cuda:0",
+    gpu_memory_utilization: float = 0.9,
+    dtype: torch.dtype | None = torch.bfloat16,
+    seed: int = 4096
+) -> LLM:
+    """
+    Start the inference process, here we use vLLM to hold a model on a GPU separate from the policy.
+    """
+    # Monkeypatch from TRL:
+    # https://github.com/huggingface/trl/blob/22759c820867c8659d00082ba8cf004e963873c1/trl/trainer/grpo_trainer.py
+    # Patch vLLM to make sure we can
+    # (1) place the vLLM model on the desired device (world_size_patch) and
+    # (2) avoid a test that is not designed for our setting (profiling_patch).
     model_executor.set_random_seed(seed)
-    # world_size_patch = patch("torch.distributed.get_world_size", return_value=1)
-    # profiling_patch = patch("vllm.worker.worker.Worker._assert_memory_footprint_increased_during_profiling", return_value=None)
-    # with world_size_patch, profiling_patch:
-    llm = LLM(
-        model=model,
-        device=device,
-        dtype=dtype,
-        enable_prefix_caching=True,
-        gpu_memory_utilization=gpu_memory_utilization
-    )
+    world_size_patch = patch("torch.distributed.get_world_size", return_value=1)
+    profiling_patch = patch("vllm.worker.worker.Worker._assert_memory_footprint_increased_during_profiling", return_value=None)
+    with world_size_patch, profiling_patch:
+        llm = LLM(
+            model=model,
+            device=device,
+            dtype=dtype,
+            enable_prefix_caching=True,
+            gpu_memory_utilization=gpu_memory_utilization
+        )
     return llm
+
+
+def load_policy_into_vllm_instance(
+    policy: PreTrainedModel, 
+    llm: LLM
+):
+    """
+    https://github.com/huggingface/trl/blob/22759c820867c8659d00082ba8cf004e963873c1/trl/trainer/grpo_trainer.py#L670.
+    """
+    state_dict = policy.state_dict()
+    llm_model = llm.llm_engine.model_executor.driver_worker.model_runner.model
+    llm_model.load_weights(state_dict.items())
 
 
 def load_eval_data(
@@ -152,6 +177,8 @@ def calculate_metrics(
     }
     metric_dict.update(count_dict)
     save_to_path_metrics = os.path.join(save_to, f"{timestamp_str}_metrics.json")
+    if not os.path.exists(save_to):
+        os.makedirs(save_to)
     with open(save_to_path_metrics, "w") as f:
         json.dump(metric_dict, f)
 
@@ -377,14 +404,14 @@ def log_generations(
     device: str | torch.device | None = "cuda",
     reward: str = "r1_zero",
     temperature: float = 1.0,
-    top_k: float = 1.0,
+    top_p: float = 1.0,
     max_tokens: int = 1024,
     eval_batch_size: int = 4
 ) -> Dict[str, Any]:
     if sampling_params is None:
         sampling_params = SamplingParams(
             temperature=temperature,
-            top_k=top_k,
+            top_p=top_p,
             max_tokens=max_tokens,
             stop=["</answer>"],
             include_stop_str_in_output=True
@@ -459,3 +486,28 @@ def log_generations(
                 f.write("\n\n")
 
     return metric_dict
+
+def clip_gradient(
+    parameters: Iterable[torch.nn.Parameter], 
+    max_l2_norm: float = 1.0,
+    eps: float = 1e-6
+) -> None:
+    total_norm = math.sqrt(
+        sum((p.grad.data ** 2).sum() if p.grad is not None else 0 
+        for p in parameters)
+    )
+    if total_norm >= max_l2_norm:
+        coef = max_l2_norm / (total_norm + eps)
+        for p in parameters:
+            if p.grad is not None:
+                p.grad.detach().mul_(coef)
+
+def set_random_seed(
+    seed: int = 2048
+) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
