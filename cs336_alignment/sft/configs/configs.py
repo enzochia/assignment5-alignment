@@ -44,6 +44,7 @@ class SFTConfig:
     temperature: float = field(default = 1.0)
     top_p: float = field(default = 1)
     max_tokens: int = field(default = 1024)
+    gpu_memory_utilization: float = field(default=0.275)
 
 
     def __post_init__(self):

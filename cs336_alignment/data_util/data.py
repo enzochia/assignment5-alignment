@@ -13,7 +13,7 @@ class MATH_SFT_Dataset(Dataset):
         with open(data_path, "r") as f:
             for line in f:
                 self.data.append(json.loads(line))
-        self.data = self.data[:20]
+        # self.data = self.data[:20]
 
     def __len__(self):
         return len(self.data)

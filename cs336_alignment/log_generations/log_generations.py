@@ -67,10 +67,11 @@ if __name__ == "__main__":
         tokenizer=tokenizer,
         model_vllm=model_vllm,
         model=model,
-        prompts=prompts[:10],
-        answers=answers[:10],
+        prompts=prompts,
+        answers=answers,
         step=10,
         sampling_params=sampling_params,
-        log_to=args.save_to
+        log_to=args.save_to,
+        eval_batch_size = 2
     )
     logging.info(metric_dict)

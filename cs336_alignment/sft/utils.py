@@ -77,7 +77,7 @@ def run_sft(
         model_eval = init_vllm(
             model=configs.model_path,
             device=configs.eval_device,
-            gpu_memory_utilization=0.225 if configs.train_device == configs.eval_device else 0.9,
+            gpu_memory_utilization=configs.gpu_memory_utilization if configs.train_device == configs.eval_device else 0.9,
             dtype=configs.train_dtype,
             seed=configs.seed
         )
@@ -158,8 +158,8 @@ def run_sft(
                 tokenizer=tokenizer,
                 model_vllm=model_eval,
                 model=model,
-                prompts=eval_prompts[:50],
-                answers=eval_answers[:50],
+                prompts=eval_prompts,
+                answers=eval_answers,
                 step=total_step_count,
                 sampling_params=eval_sampling_params,
                 log_to=configs.log_dir,
@@ -168,7 +168,7 @@ def run_sft(
                 temperature=1.0,
                 top_p=1.0,
                 max_tokens=1024,
-                eval_batch_size= 1 # lower it if OOM
+                eval_batch_size= 2 # lower it if OOM
             )
             logging.info(f"Eval metric results:")
             logging.info(metric_dict)

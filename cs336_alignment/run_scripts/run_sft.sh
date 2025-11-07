@@ -12,4 +12,5 @@ uv run --active -m cs336_alignment.sft.run_sft \
   --batch_size 16 \
   --gradient_accumulation_steps 16 \
   --num_epochs 2 \
+  --gpu_memory_utilization 0.275 \
   --do_eval
