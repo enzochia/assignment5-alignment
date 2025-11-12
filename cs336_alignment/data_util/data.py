@@ -21,8 +21,16 @@ class MATH_SFT_Dataset(Dataset):
     def __getitem__(self, idx):
         return self.data[idx]
 
-def collate_fn(batch):
+def collate_fn_sft(batch):
     prompts = [item["prompt"] for item in batch]
     outputs = [item["response"] for item in batch]
     answers = [item["ground_truth"] for item in batch]
     return prompts, outputs, answers
+
+def collate_fn_train(batch):
+    problem = [item["problem"] for item in batch]
+    level = [item["level"] for item in batch]
+    subject = [item["subject"] for item in batch]
+    unique_id = [item["unique_id"] for item in batch]
+    answer = [item["answer"] for item in batch]
+    return problem, level, subject, unique_id, answer

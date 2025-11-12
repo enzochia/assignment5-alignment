@@ -14,7 +14,7 @@ from .configs import SFTConfig
 from torch.utils.data import DataLoader
 from cs336_alignment.data_util import (
     MATH_SFT_Dataset,
-    collate_fn
+    collate_fn_sft
 )
 from cs336_alignment.utils import (
     set_random_seed,
@@ -51,7 +51,7 @@ def run_sft(
         train_data,
         batch_size=configs.batch_size // configs.gradient_accumulation_steps,
         shuffle=True,
-        collate_fn=collate_fn
+        collate_fn=collate_fn_sft
     )
     micro_steps_per_epoch = len(train_dataloader)
     microbatch_size = configs.batch_size // configs.gradient_accumulation_steps
