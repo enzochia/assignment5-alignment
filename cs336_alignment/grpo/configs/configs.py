@@ -1,7 +1,7 @@
 import os
 import torch
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Literal
+from typing import Optional, Dict, Literal, Tuple
 
 
 @dataclass
@@ -24,9 +24,6 @@ class GRPOConfig:
     checkpoint_dir: str = field(default = "outputs/ckpt/")
     log_dir: str = field(default = "outputs/logs/")
     seed: int = field(default = 2048)
-    lr_scheduler: str = field(default = "cosine_with_min_lr")
-    lr: float = field(default = 4e-5)
-    lr_scheduler_kwargs: Dict[str, float] = field(default_factory = lambda : {"min_lr_rate": 0.1})
     loss_type: Literal["no_baseline", "reinforce_with_baseline", "grpo_clip"] = field(default="reinforce_with_baseline")
     train_batch_size: int = field(default = 16)
     gradient_accumulation_steps: int = field(default = 4)
@@ -40,6 +37,13 @@ class GRPOConfig:
     grad_clip: float = field(default = 1)
     num_epochs: int = field(default = 4)
 
+    # Optim parameters
+    lr_scheduler: str = field(default = "cosine_with_min_lr")
+    lr: float = field(default = 4e-5)
+    lr_scheduler_kwargs: Dict[str, float] = field(default_factory = lambda : {"min_lr_rate": 0.1})
+    weight_decay: float = field(default = 0)
+    betas: Tuple[float] = field(default_factory = lambda : (0.9, 0.95))
+
     # Logging parameters
     wandb_entity: Optional[str] = field(default=None)
     wandb_project: Optional[str] = field(default=None)
@@ -50,6 +54,7 @@ class GRPOConfig:
 
     # Eval parameter
     do_eval: bool = False
+    do_eval_before_train: bool = False
     temperature: float = field(default = 1.0)
     top_p: float = field(default = 1)
     min_tokens: int = field(default = 4)
@@ -82,3 +87,5 @@ class GRPOConfig:
         self.off_policy = self.n_train_steps_per_rollout_batch > 1
 
         assert ((self.loss_type != "grpo_clip") or self.off_policy)
+
+        self.grpo_start_from = 0 if self.do_eval_before_train else 1

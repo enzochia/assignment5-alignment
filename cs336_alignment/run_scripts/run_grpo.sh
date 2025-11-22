@@ -17,8 +17,9 @@ uv run --active -m cs336_alignment.grpo.run_grpo \
   --rollout_batch_size 4 \
   --group_size 4 \
   --loss_type reinforce_with_baseline \
-  --gpu_memory_utilization 0.3 \
-  --eval_every 40 \
+  --gpu_memory_utilization 0.28 \
+  --eval_every 10 \
   --eval_batch_size 2 \
   --do_eval \
+  # --do_eval_before_train \
   # --normalize_by_std

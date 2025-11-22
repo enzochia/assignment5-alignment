@@ -155,10 +155,8 @@ def compute_policy_gradient_loss(
     Wrapper that delegates to the appropriate policy gradient loss function above.
     """
     assert loss_type in {"no_baseline", "reinforce_with_baseline", "grpo_clip"}
-    assert loss_type != "no_baseline" or ((raw_rewards is not None) and 
-                                          (len(raw_rewards.size()) == 2) and 
-                                          (raw_rewards.size()[1] == 1))
-    assert advantages not in {"reinforce_with_baseline", "grpo_clip"} or \
+    assert loss_type != "no_baseline" or (raw_rewards is not None)
+    assert loss_type not in {"reinforce_with_baseline", "grpo_clip"} or \
            ((advantages is not None) and 
             (len(advantages.size()) == 2) and 
             (advantages.size()[1] == 1))
@@ -303,7 +301,7 @@ def infinite_dataloader(loader):
         for batch in loader:
             yield batch
 
-# TODO: 1) record rewards, 2) wandb
+# TODO: 1) issue: grpo_clip loss_type get e7 grad_norm, 2) wandb
 def train_grpo(
     configs: GRPOConfig
 ):
@@ -327,7 +325,6 @@ def train_grpo(
         collate_fn=collate_fn_train
     )
     micro_steps_per_epoch = len(train_dataloader)
-    microbatch_size = configs.train_batch_size // configs.gradient_accumulation_steps
     logging.info(f"length of train_data: {len(train_data)}, length of train_dataloader: {len(train_dataloader)}.")
  
     model_inf = get_inference_model(configs)
@@ -338,7 +335,12 @@ def train_grpo(
     eval_prompts = [prompt_template.format(question=question) for question in eval_questions]
 
     logging.info(f"Initializing optimizer and lr scheduler.")
-    optimizer = AdamW(model.parameters(), lr=configs.lr)
+    optimizer = AdamW(
+        model.parameters(), 
+        lr=configs.lr,
+        weight_decay=configs.weight_decay,
+        betas=configs.betas
+    )
     total_steps = configs.n_grpo_steps * configs.n_train_steps_per_rollout_batch * configs.rollout_batch_size // configs.train_batch_size
     lr_scheduler = get_scheduler(
         name=configs.lr_scheduler,
@@ -353,7 +355,8 @@ def train_grpo(
     total_step_count = -1
     model.train()
     pbar = tqdm(total=configs.n_grpo_steps, desc="GRPO", dynamic_ncols=True)
-    for step, (problems, _, _, _, answers) in enumerate(islice(infinite_dataloader(train_dataloader), configs.n_grpo_steps), start=0):
+    for step, (problems, _, _, _, answers) in enumerate(islice(infinite_dataloader(train_dataloader), configs.n_grpo_steps), 
+                                                        start=configs.grpo_start_from):
         prompts = [prompt_template.format(question=problem) for problem in problems]
         outputs = model_inf.generate(prompts, sampling_params=sampling_params, use_tqdm=False)
         batch_data = {"prompts": [], "outputs": [], "answers": []}
@@ -371,6 +374,7 @@ def train_grpo(
             normalize_by_std=configs.normalize_by_std,
             device=configs.train_device
         )
+        step_reward = torch.sum(raw_rewards).item()
         # a dict of 3 tensors, each has [configs.n_prompts_per_rollout_batch * configs.group_size, seq_len]
         tokenized_results = tokenize_prompt_and_output(
             prompt_strs=batch_data["prompts"], 
@@ -418,7 +422,7 @@ def train_grpo(
                         response_mask=tokenized_results["response_mask"][idx_start:idx_end],
                         gradient_accumulation_steps=configs.gradient_accumulation_steps,
                         loss_type=configs.loss_type,
-                        raw_rewards=raw_rewards[idx_start:idx_end],
+                        raw_rewards=raw_rewards[idx_start:idx_end].unsqueeze(-1),
                         advantages=advantages[idx_start:idx_end].unsqueeze(-1),
                         old_log_probs=old_log_probs_tensor,
                         cliprange=configs.cliprange,
@@ -427,16 +431,21 @@ def train_grpo(
                     step_loss += loss
                     if ((micro_step_count % configs.gradient_accumulation_steps == 0) or
                         (micro_step_count == configs.rollout_batch_size)):
-                        clip_grad_norm_(model.parameters(), max_norm=configs.grad_clip)
+                        grad_norm = clip_grad_norm_(model.parameters(), max_norm=configs.grad_clip)
                         optimizer.step()
                         lr_scheduler.step()
                         optimizer.zero_grad()
-
+                        if hasattr(lr_scheduler, "get_last_lr"):
+                            lr = lr_scheduler.get_last_lr()[0]
+                        else:
+                            lr = optimizer.param_groups[0]["lr"]
                         total_step_count += 1
                         pbar.set_postfix(
                             step=step,
+                            lr=f"{lr:.2e}",
+                            grad_norm=f"{grad_norm:.2f}",
                             step_loss=f"{step_loss:.4f}",
-                            step_reward=f"place_holder"
+                            step_reward=f"{step_reward}/{configs.rollout_batch_size}",
                         )
                         step_loss = 0
 
@@ -472,8 +481,16 @@ def train_grpo(
 
 """
 note: start from outputs/ckpt/ckpt_2epoch_220steps/ model, 
+loss_type: "no_baseline":
+ {'step': 10, 'eval_sample_size': 5000, 'count_correct_format': 3865.0, 'count_correct_answer': 1881.0, 'total_reward': 1881.0, 'avg_token_entropy': 0.40234375, 
+ 'avg_response_len': 139.16339111328125, 'avg_correct_response_len': 108.86602783203125, 'avg_incorrect_response_len': 157.43508911132812}
+loss_type: "reinforce_with_baseline":
  {'step': 0, 'eval_sample_size': 5000, 'count_correct_format': 3912.0, 'count_correct_answer': 1909.0, 'total_reward': 1909.0, 'avg_token_entropy': 0.400390625, 
  'avg_response_len': 139.8553924560547, 'avg_correct_response_len': 110.40387725830078, 'avg_incorrect_response_len': 158.04464721679688}
- {'step': 40, 'eval_sample_size': 5000, 'count_correct_format': 4368.0, 'count_correct_answer': 1030.0, 'total_reward': 1030.0, 'avg_token_entropy': 0.5703125, 
- 'avg_response_len': 160.14520263671875, 'avg_correct_response_len': 64.53981018066406, 'avg_incorrect_response_len': 184.9496307373047}
+ {'step': 10, 'eval_sample_size': 5000, 'count_correct_format': 4805.0, 'count_correct_answer': 2486.0, 'total_reward': 2486.0, 'avg_token_entropy': 0.10205078125, 
+ 'avg_response_len': 142.3791961669922, 'avg_correct_response_len': 114.08648681640625, 'avg_incorrect_response_len': 170.35679626464844}
+ {'step': 20, 'eval_sample_size': 5000, 'count_correct_format': 4962.0, 'count_correct_answer': 2161.0, 'total_reward': 2161.0, 'avg_token_entropy': 0.1298828125, 
+ 'avg_response_len': 114.58580017089844, 'avg_correct_response_len': 88.78112030029297, 'avg_incorrect_response_len': 134.22789001464844}
+ {'step': 30, 'eval_sample_size': 5000, 'count_correct_format': 4938.0, 'count_correct_answer': 2053.0, 'total_reward': 2053.0, 'avg_token_entropy': 0.1474609375, 
+ 'avg_response_len': 116.37519836425781, 'avg_correct_response_len': 90.17340850830078, 'avg_incorrect_response_len': 134.62843322753906}
 """
