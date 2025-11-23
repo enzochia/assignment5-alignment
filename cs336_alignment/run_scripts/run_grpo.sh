@@ -16,7 +16,7 @@ uv run --active -m cs336_alignment.grpo.run_grpo \
   --gradient_accumulation_steps 8 \
   --rollout_batch_size 4 \
   --group_size 4 \
-  --loss_type reinforce_with_baseline \
+  --loss_type grpo_clip \
   --gpu_memory_utilization 0.28 \
   --eval_every 10 \
   --eval_batch_size 2 \

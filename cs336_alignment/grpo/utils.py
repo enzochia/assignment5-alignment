@@ -136,11 +136,30 @@ def compute_grpo_clip_loss(
             metadata: dict[str, torch.Tensor]: metadata for the GRPO-Clip loss 
                 (used to compute clip fraction).
     """
-    g_clip = (1 + cliprange) * advantages * (advantages >= 0) + \
-             (1 - cliprange) * advantages * (advantages < 0)
-    advantages_importance_sampled = torch.exp(policy_log_probs - old_log_probs) * advantages
-    loss = -torch.min(advantages_importance_sampled, g_clip)
+    # g_clip = (1 + cliprange) * advantages * (advantages >= 0) + \
+    #          (1 - cliprange) * advantages * (advantages < 0)
+    # advantages_importance_sampled = torch.exp(policy_log_probs - old_log_probs) * advantages
+    # loss = -torch.min(advantages_importance_sampled, g_clip)
+    # return loss, {}
+
+    # [bs, seq_len]
+    ratio = torch.exp(policy_log_probs - old_log_probs)
+    pg1 = ratio * advantages
+    pg2 = torch.clamp(ratio, 1 - cliprange, 1 + cliprange) * advantages
+
+    loss = -torch.where(
+        advantages >= 0,
+        torch.min(pg1, pg2),
+        torch.max(pg1, pg2),
+    )
     return loss, {}
+
+    # # [bs, seq_len]
+    # importance = torch.clamp(torch.exp(policy_log_probs - old_log_probs), 
+    #                          1 - cliprange, 1 + cliprange)
+    # # [bs, seq_len]
+    # loss = -importance * advantages
+    # return loss, {}
 
 
 def compute_policy_gradient_loss(
@@ -160,9 +179,9 @@ def compute_policy_gradient_loss(
            ((advantages is not None) and 
             (len(advantages.size()) == 2) and 
             (advantages.size()[1] == 1))
-    assert old_log_probs != "grpo_clip" or ((advantages is not None) and 
+    assert loss_type != "grpo_clip" or ((advantages is not None) and 
                                             (len(advantages.size()) == 2))
-    assert old_log_probs != "grpo_clip" or (cliprange is not None) 
+    assert loss_type != "grpo_clip" or (cliprange is not None) 
 
     loss = None
     metadata = {}
@@ -439,6 +458,7 @@ def train_grpo(
                             lr = lr_scheduler.get_last_lr()[0]
                         else:
                             lr = optimizer.param_groups[0]["lr"]
+                        print(f"step: {step}, lr: {lr:.2e}, grad_norm: {grad_norm:.2f}, step_loss: {step_loss:.4f}, step_reward: {step_reward}/{configs.rollout_batch_size}")
                         total_step_count += 1
                         pbar.set_postfix(
                             step=step,
