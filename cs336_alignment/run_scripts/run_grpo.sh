@@ -7,6 +7,8 @@ uv run --active -m cs336_alignment.grpo.run_grpo \
   --eval_device cuda:0 \
   --checkpoint_dir outputs/ckpt/grpo/ \
   --log_dir outputs/logs/grpo/ \
+  --grpo_clip_loss_type clip_term_only \
+  --KL_beta 5e-1 \
   --lr_scheduler cosine_with_min_lr \
   --lr 0.00004 \
   --n_grpo_steps 200 \

@@ -112,7 +112,100 @@ def compute_naive_policy_gradient_loss(
     return -policy_log_probs * raw_rewards_or_advantages
 
 
+def compute_grpo_KL_penalty_term(
+    policy_log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor
+) -> torch.Tensor:
+    ratio = torch.exp(old_log_probs - policy_log_probs).to(torch.float32)
+    return (ratio - torch.log(ratio) - 1).to(policy_log_probs.dtype)
+
+
+def compute_reward_KL_penalty_term(
+    policy_log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor
+) -> torch.Tensor:
+    raise NotImplmentedError
+
+
+def compute_KL_penalty_term(
+    configs: GRPOConfig,
+    policy_log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+) -> torch.Tensor:
+    if configs.KL_approx_method == "grpo":
+        return compute_grpo_KL_penalty_term(policy_log_probs=policy_log_probs, old_log_probs=old_log_probs)
+    elif configs.KL_approx_method == "reward":
+        return compute_reward_KL_penalty_term(policy_log_probs=policy_log_probs, old_log_probs=old_log_probs)
+
+
+def compute_grpo_clip_loss_no_kl_term(
+    configs: GRPOConfig,
+    advantages: torch.Tensor,
+    policy_log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    cliprange: float,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    g_clip = (1 + cliprange) * advantages * (advantages >= 0) + \
+             (1 - cliprange) * advantages * (advantages < 0)
+    advantages_importance_sampled = torch.exp(policy_log_probs - old_log_probs) * advantages
+    loss = -torch.min(advantages_importance_sampled, g_clip)
+    return loss, {}
+
+def compute_grpo_clip_loss_with_kl_term(
+    configs: GRPOConfig,
+    advantages: torch.Tensor,
+    policy_log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    cliprange: float,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    g_clip = (1 + cliprange) * advantages * (advantages >= 0) + \
+             (1 - cliprange) * advantages * (advantages < 0)
+    advantages_importance_sampled = torch.exp(policy_log_probs - old_log_probs) * advantages
+    loss = -torch.min(advantages_importance_sampled, g_clip) + \
+        configs.KL_beta * compute_KL_penalty_term(
+            configs=configs,
+            policy_log_probs=policy_log_probs,
+            old_log_probs=old_log_probs,
+        )
+    return loss, {}
+
+
+def compute_grpo_clip_loss_max_min(
+    configs: GRPOConfig,
+    advantages: torch.Tensor,
+    policy_log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    cliprange: float,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    # [bs, seq_len]
+    ratio = torch.exp(policy_log_probs - old_log_probs)
+    pg1 = ratio * advantages
+    pg2 = torch.clamp(ratio, 1 - cliprange, 1 + cliprange) * advantages
+    loss = -torch.where(
+        advantages >= 0,
+        torch.min(pg1, pg2),
+        torch.max(pg1, pg2),
+    )
+    return loss, {}
+
+
+def compute_grpo_clip_loss_only_clip_term(
+    configs: GRPOConfig,
+    advantages: torch.Tensor,
+    policy_log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    cliprange: float,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    # [bs, seq_len]
+    importance = torch.clamp(torch.exp(policy_log_probs - old_log_probs), 
+                             1 - cliprange, 1 + cliprange)
+    # [bs, seq_len]
+    loss = -importance * advantages
+    return loss, {}
+
+
 def compute_grpo_clip_loss(
+    configs: GRPOConfig,
     advantages: torch.Tensor,
     policy_log_probs: torch.Tensor,
     old_log_probs: torch.Tensor,
@@ -136,33 +229,27 @@ def compute_grpo_clip_loss(
             metadata: dict[str, torch.Tensor]: metadata for the GRPO-Clip loss 
                 (used to compute clip fraction).
     """
-    # g_clip = (1 + cliprange) * advantages * (advantages >= 0) + \
-    #          (1 - cliprange) * advantages * (advantages < 0)
-    # advantages_importance_sampled = torch.exp(policy_log_probs - old_log_probs) * advantages
-    # loss = -torch.min(advantages_importance_sampled, g_clip)
-    # return loss, {}
+    loss_func_map = {
+        "no_kl": compute_grpo_clip_loss_no_kl_term,
+        "kl": compute_grpo_clip_loss_with_kl_term,
+        "max_min": compute_grpo_clip_loss_max_min,
+        "clip_term_only": compute_grpo_clip_loss_only_clip_term
+    }
+    loss_func = loss_func_map.get(configs.grpo_clip_loss_type)
+    if loss_func is None:
+        raise ValueError(f"Unknown loss type {configs.grpo_clip_loss_type}")
 
-    # [bs, seq_len]
-    ratio = torch.exp(policy_log_probs - old_log_probs)
-    pg1 = ratio * advantages
-    pg2 = torch.clamp(ratio, 1 - cliprange, 1 + cliprange) * advantages
-
-    loss = -torch.where(
-        advantages >= 0,
-        torch.min(pg1, pg2),
-        torch.max(pg1, pg2),
+    return compute_grpo_clip_loss_no_kl_term(
+        configs=configs,
+        advantages=advantages,
+        policy_log_probs=policy_log_probs,
+        old_log_probs=old_log_probs,
+        cliprange=cliprange
     )
-    return loss, {}
-
-    # # [bs, seq_len]
-    # importance = torch.clamp(torch.exp(policy_log_probs - old_log_probs), 
-    #                          1 - cliprange, 1 + cliprange)
-    # # [bs, seq_len]
-    # loss = -importance * advantages
-    # return loss, {}
 
 
 def compute_policy_gradient_loss(
+    configs: GRPOConfig,
     policy_log_probs: torch.Tensor,
     loss_type: Literal["no_baseline", "reinforce_with_baseline", "grpo_clip"],
     raw_rewards: torch.Tensor | None= None,
@@ -197,6 +284,7 @@ def compute_policy_gradient_loss(
         ) 
     elif loss_type == "grpo_clip":
         loss, metadata = compute_grpo_clip_loss(
+            configs=configs,
             advantages=advantages,
             policy_log_probs=policy_log_probs,
             old_log_probs=old_log_probs,
@@ -230,6 +318,7 @@ def masked_mean(
 
 
 def grpo_microbatch_train_step(
+    configs: GRPOConfig,
     policy_log_probs: torch.Tensor,
     response_mask: torch.Tensor,
     gradient_accumulation_steps: int,
@@ -266,6 +355,7 @@ def grpo_microbatch_train_step(
             the policy gradient loss and its metadata.
     """
     loss, metadata = compute_policy_gradient_loss(
+        configs=configs,
         policy_log_probs=policy_log_probs,
         loss_type=loss_type,
         raw_rewards=raw_rewards,
@@ -320,7 +410,7 @@ def infinite_dataloader(loader):
         for batch in loader:
             yield batch
 
-# TODO: 1) issue: grpo_clip loss_type get e7 grad_norm, 2) wandb
+# TODO: 1) wandb
 def train_grpo(
     configs: GRPOConfig
 ):
@@ -417,7 +507,7 @@ def train_grpo(
                             return_token_entropy=False
                         )
                         old_log_probs_list.append(log_probs_dict["log_probs"])
-                old_log_probs_tensor = torch.cat(old_log_probs_list)
+                old_log_probs_tensor_full_rollout = torch.cat(old_log_probs_list)
         
         model.train()
         micro_step_count = 0
@@ -434,9 +524,10 @@ def train_grpo(
                         labels=tokenized_results["labels"][idx_start:idx_end],
                         return_token_entropy=False
                     )
-                    old_log_probs_tensor = old_log_probs_tensor if configs.off_policy else \
+                    old_log_probs_tensor = old_log_probs_tensor_full_rollout[idx_start:idx_end] if configs.off_policy else \
                                            log_probs_dict["log_probs"].detach()
                     loss, metadata = grpo_microbatch_train_step(
+                        configs=configs,
                         policy_log_probs=log_probs_dict["log_probs"],
                         response_mask=tokenized_results["response_mask"][idx_start:idx_end],
                         gradient_accumulation_steps=configs.gradient_accumulation_steps,
@@ -458,7 +549,7 @@ def train_grpo(
                             lr = lr_scheduler.get_last_lr()[0]
                         else:
                             lr = optimizer.param_groups[0]["lr"]
-                        print(f"step: {step}, lr: {lr:.2e}, grad_norm: {grad_norm:.2f}, step_loss: {step_loss:.4f}, step_reward: {step_reward}/{configs.rollout_batch_size}")
+                        # print(f"step: {step}, lr: {lr:.2e}, grad_norm: {grad_norm:.2f}, step_loss: {step_loss:.4f}, step_reward: {step_reward}/{configs.rollout_batch_size}")
                         total_step_count += 1
                         pbar.set_postfix(
                             step=step,

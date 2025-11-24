@@ -44,6 +44,11 @@ class GRPOConfig:
     weight_decay: float = field(default = 0)
     betas: Tuple[float] = field(default_factory = lambda : (0.9, 0.95))
 
+    # Loss parameters
+    KL_beta: float = field(default = 4e-2)
+    KL_approx_method: Literal["grpo", "reward"] = field(default="grpo")
+    grpo_clip_loss_type: Literal["no_kl", "kl", "max_min", "clip_term_only"] = field(default="clip_term_only")
+
     # Logging parameters
     wandb_entity: Optional[str] = field(default=None)
     wandb_project: Optional[str] = field(default=None)
