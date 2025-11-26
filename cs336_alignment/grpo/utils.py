@@ -32,6 +32,7 @@ from cs336_alignment.data_util import (
 from .configs import GRPOConfig
 from itertools import cycle, islice
 from tqdm import tqdm
+import wandb
 import logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -410,11 +411,17 @@ def infinite_dataloader(loader):
         for batch in loader:
             yield batch
 
-# TODO: 1) wandb
+
 def train_grpo(
     configs: GRPOConfig
 ):
     set_random_seed(configs.seed)
+    wandb.init(
+        project=configs.wandb_project,
+        entity=configs.wandb_entity,
+        name=configs.wandb_run_name,
+        config=vars(configs)
+    )
     logging.info(f"Loading model and tokenizer to {torch.device(configs.train_device)}")
     model = AutoModelForCausalLM.from_pretrained(
         configs.model_path,
@@ -442,6 +449,11 @@ def train_grpo(
     eval_questions, eval_answers = load_eval_data("MATH", configs.data_eval_path)
     prompt_template = load_prompt_template(configs.prompt_template_path)
     eval_prompts = [prompt_template.format(question=question) for question in eval_questions]
+    print(f"Loaded {len(eval_prompts)} eval prompts, {len(eval_answers)} eval answers.")
+    if len(eval_prompts) > configs.eval_size:
+        eval_prompts = eval_prompts[:configs.eval_size]
+        eval_answers = eval_answers[:configs.eval_size]
+    print(f"Using {len(eval_prompts)} eval prompts, {len(eval_answers)} eval answers for evaluation.")
 
     logging.info(f"Initializing optimizer and lr scheduler.")
     optimizer = AdamW(
@@ -461,11 +473,10 @@ def train_grpo(
 
     sampling_params, sampling_params_eval = get_sampling_params(configs)
 
-    total_step_count = -1
+    total_step_count = 0
     model.train()
     pbar = tqdm(total=configs.n_grpo_steps, desc="GRPO", dynamic_ncols=True)
-    for step, (problems, _, _, _, answers) in enumerate(islice(infinite_dataloader(train_dataloader), configs.n_grpo_steps), 
-                                                        start=configs.grpo_start_from):
+    for step, (problems, _, _, _, answers) in enumerate(islice(infinite_dataloader(train_dataloader), configs.n_grpo_steps)):
         prompts = [prompt_template.format(question=problem) for problem in problems]
         outputs = model_inf.generate(prompts, sampling_params=sampling_params, use_tqdm=False)
         batch_data = {"prompts": [], "outputs": [], "answers": []}
@@ -510,9 +521,9 @@ def train_grpo(
                 old_log_probs_tensor_full_rollout = torch.cat(old_log_probs_list)
         
         model.train()
-        micro_step_count = 0
         step_loss = 0
         for grpo_step in range(configs.n_train_steps_per_rollout_batch):
+            micro_step_count = 0
             for micro_step in range(configs.n_microbatches_per_rollout_batch + 1):
                 idx_start = micro_step * configs.micro_train_batch_size
                 if idx_start < configs.rollout_batch_size:
@@ -536,8 +547,13 @@ def train_grpo(
                         advantages=advantages[idx_start:idx_end].unsqueeze(-1),
                         old_log_probs=old_log_probs_tensor,
                         cliprange=configs.cliprange,
-                    ) 
+                    )
                     micro_step_count += 1
+                    wandb.log({
+                        "train/micro_step_loss": loss.item(),
+                        "train/step_reward": step_reward / configs.rollout_batch_size,
+                    }, step=total_step_count * configs.rollout_batch_size + micro_step_count - 1)
+                    
                     step_loss += loss
                     if ((micro_step_count % configs.gradient_accumulation_steps == 0) or
                         (micro_step_count == configs.rollout_batch_size)):
@@ -549,8 +565,11 @@ def train_grpo(
                             lr = lr_scheduler.get_last_lr()[0]
                         else:
                             lr = optimizer.param_groups[0]["lr"]
-                        # print(f"step: {step}, lr: {lr:.2e}, grad_norm: {grad_norm:.2f}, step_loss: {step_loss:.4f}, step_reward: {step_reward}/{configs.rollout_batch_size}")
-                        total_step_count += 1
+                        wandb.log({
+                            "train/lr": lr,
+                            "train/grad_norm": grad_norm,
+                            "train/step_loss": step_loss.item()
+                        }, step=total_step_count * configs.rollout_batch_size + micro_step_count - 1)
                         pbar.set_postfix(
                             step=step,
                             lr=f"{lr:.2e}",
@@ -559,9 +578,10 @@ def train_grpo(
                             step_reward=f"{step_reward}/{configs.rollout_batch_size}",
                         )
                         step_loss = 0
+                        total_step_count += 1
 
         if (configs.do_eval and
-            step % configs.eval_every == 0):
+            (step + configs.grpo_start_from) % configs.eval_every == 0):
             model.eval()
             load_policy_into_vllm_instance(model, model_inf)
 
@@ -582,6 +602,15 @@ def train_grpo(
                 eval_batch_size=configs.eval_batch_size
             )
             logging.info(eval_results)
+            wandb.log({
+                "eval/format_reward": eval_results["count_correct_format"] / eval_results["eval_sample_size"],
+                "eval/answer_reward": eval_results["count_correct_answer"] / eval_results["eval_sample_size"],
+                "eval/total_reward": eval_results["total_reward"] / eval_results["eval_sample_size"],
+                "eval/avg_token_entropy": eval_results["avg_token_entropy"],
+                "eval/avg_response_len": eval_results["avg_response_len"],
+                "eval/avg_correct_response_len": eval_results["avg_correct_response_len"],
+                "eval/avg_incorrect_response_len": eval_results["avg_incorrect_response_len"]
+            }, step=total_step_count * configs.rollout_batch_size - 1)
         pbar.update(1)
 
     if configs.checkpoint_dir is not None:
@@ -591,17 +620,4 @@ def train_grpo(
         tokenizer.save_pretrained(ckpt_path)
 
 """
-note: start from outputs/ckpt/ckpt_2epoch_220steps/ model, 
-loss_type: "no_baseline":
- {'step': 10, 'eval_sample_size': 5000, 'count_correct_format': 3865.0, 'count_correct_answer': 1881.0, 'total_reward': 1881.0, 'avg_token_entropy': 0.40234375, 
- 'avg_response_len': 139.16339111328125, 'avg_correct_response_len': 108.86602783203125, 'avg_incorrect_response_len': 157.43508911132812}
-loss_type: "reinforce_with_baseline":
- {'step': 0, 'eval_sample_size': 5000, 'count_correct_format': 3912.0, 'count_correct_answer': 1909.0, 'total_reward': 1909.0, 'avg_token_entropy': 0.400390625, 
- 'avg_response_len': 139.8553924560547, 'avg_correct_response_len': 110.40387725830078, 'avg_incorrect_response_len': 158.04464721679688}
- {'step': 10, 'eval_sample_size': 5000, 'count_correct_format': 4805.0, 'count_correct_answer': 2486.0, 'total_reward': 2486.0, 'avg_token_entropy': 0.10205078125, 
- 'avg_response_len': 142.3791961669922, 'avg_correct_response_len': 114.08648681640625, 'avg_incorrect_response_len': 170.35679626464844}
- {'step': 20, 'eval_sample_size': 5000, 'count_correct_format': 4962.0, 'count_correct_answer': 2161.0, 'total_reward': 2161.0, 'avg_token_entropy': 0.1298828125, 
- 'avg_response_len': 114.58580017089844, 'avg_correct_response_len': 88.78112030029297, 'avg_incorrect_response_len': 134.22789001464844}
- {'step': 30, 'eval_sample_size': 5000, 'count_correct_format': 4938.0, 'count_correct_answer': 2053.0, 'total_reward': 2053.0, 'avg_token_entropy': 0.1474609375, 
- 'avg_response_len': 116.37519836425781, 'avg_correct_response_len': 90.17340850830078, 'avg_incorrect_response_len': 134.62843322753906}
 """

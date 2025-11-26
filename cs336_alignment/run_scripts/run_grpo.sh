@@ -22,6 +22,9 @@ uv run --active -m cs336_alignment.grpo.run_grpo \
   --gpu_memory_utilization 0.28 \
   --eval_every 10 \
   --eval_batch_size 2 \
+  --wandb_project GRPO-Qwen2.5-Math-1.5B-dev \
+  --wandb_run_name grpo_dev_run_00 \
   --do_eval \
+  --eval_size 1024 \
   # --do_eval_before_train \
   # --normalize_by_std

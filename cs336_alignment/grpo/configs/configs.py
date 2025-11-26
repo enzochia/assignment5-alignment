@@ -50,8 +50,8 @@ class GRPOConfig:
     grpo_clip_loss_type: Literal["no_kl", "kl", "max_min", "clip_term_only"] = field(default="clip_term_only")
 
     # Logging parameters
-    wandb_entity: Optional[str] = field(default=None)
-    wandb_project: Optional[str] = field(default=None)
+    wandb_entity: Optional[str] = field(default="enzojia-personal-research-and-development")
+    wandb_project: Optional[str] = field(default="GRPO-Qwen2.5-Math-1.5B")
     wandb_run_name: Optional[str] = field(default=None)
     log_every: Optional[int] = field(default=None)
     eval_every: Optional[int] = field(default=10)
@@ -67,6 +67,7 @@ class GRPOConfig:
     stop: str = field(default = "</answer>")
     gpu_memory_utilization: float = field(default=0.275)
     eval_batch_size: int = field(default = 2)
+    eval_size: int = field(default = float("inf"))
 
 
     def __post_init__(self):
