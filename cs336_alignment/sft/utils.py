@@ -1,6 +1,7 @@
 import os
 import torch
 import logging
+import wandb
 from torch.optim import AdamW
 from tqdm import tqdm
 from transformers import (
@@ -25,7 +26,8 @@ from cs336_alignment.utils import (
     load_policy_into_vllm_instance,
     tokenize_prompt_and_output,
     get_response_log_probs,
-    log_generations
+    log_generations,
+    get_grad_norm
 )
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -34,6 +36,12 @@ def run_sft(
     configs: SFTConfig
 ) -> None:
     set_random_seed(configs.seed)
+    wandb.init(
+        project=configs.wandb_project,
+        entity=configs.wandb_entity,
+        name=configs.wandb_run_name,
+        config=vars(configs)
+    )
 
     logging.info(f"Loading model and tokenizer to {torch.device(configs.train_device)}")
     model = AutoModelForCausalLM.from_pretrained(
@@ -81,17 +89,55 @@ def run_sft(
             dtype=configs.train_dtype,
             seed=configs.seed
         )
+        eval_sampling_params = SamplingParams(
+            temperature=configs.temperature,
+            top_p=configs.top_p,
+            max_tokens=configs.max_tokens,
+            stop=["</answer>"],
+            include_stop_str_in_output=True
+        )
+
+        eval_results = log_generations(
+            tokenizer=tokenizer,
+            model_vllm=model_eval,
+            model=model,
+            prompts=eval_prompts,
+            answers=eval_answers,
+            step=0,
+            sampling_params=eval_sampling_params,
+            log_to=configs.log_dir,
+            device=configs.train_device, # this may be wrong
+            reward=configs.prompt,
+            temperature=1.0,
+            top_p=1.0,
+            max_tokens=1024,
+            eval_batch_size= configs.eval_batch_size # lower it if OOM
+        )
+        logging.info(f"Eval metric results:")
+        logging.info(eval_results)
+        wandb.log({
+            "eval/format_reward": eval_results["count_correct_format"] / eval_results["eval_sample_size"],
+            "eval/answer_reward": eval_results["count_correct_answer"] / eval_results["eval_sample_size"],
+            "eval/total_reward": eval_results["total_reward"] / eval_results["eval_sample_size"],
+            "eval/avg_token_entropy": eval_results["avg_token_entropy"],
+            "eval/avg_response_len": eval_results["avg_response_len"],
+            "eval/avg_correct_response_len": eval_results["avg_correct_response_len"],
+            "eval/avg_incorrect_response_len": eval_results["avg_incorrect_response_len"]
+        }, step=0)
     else:
         model_eval = None
 
     model.train()
-    total_step_count = -1
+    total_microstep_count = -1
+
+
+
     for epoch in range(configs.num_epochs):
         loss_batch = 0
-        pbar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}", dynamic_ncols=True)
+        pbar = tqdm(train_dataloader, desc=f"Epoch {epoch}", dynamic_ncols=True)
         # for prompts, outputs, answers in tqdm(train_dataloader, desc=f"Epoch #{epoch}"):
         for micro_step, (prompts, outputs, answers) in enumerate(pbar, start=1):
-            total_step_count += 1
+            total_microstep_count += 1
             batch_tokenized = tokenize_prompt_and_output(
                 prompt_strs=prompts, 
                 output_strs=outputs,
@@ -116,27 +162,32 @@ def run_sft(
             )
             loss_batch += loss.item()
 
-            if (total_step_count - epoch * micro_steps_per_epoch + 1) % configs.gradient_accumulation_steps == 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            if (total_microstep_count - epoch * micro_steps_per_epoch + 1) % configs.gradient_accumulation_steps == 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=configs.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
                 lr_show = lr_scheduler.get_last_lr()[0] if hasattr(lr_scheduler, "get_last_lr") else optimizer.param_groups[0]["lr"]
                 pbar.set_postfix(
-                    step=total_step_count // configs.gradient_accumulation_steps,
+                    step=total_microstep_count // configs.gradient_accumulation_steps,
                     loss=f"{loss_batch:.4f}",
                     lr=f"{lr_show:.2e}"
                 )
+                wandb.log({
+                    "train/lr": lr_show,
+                    "train/grad_norm": get_grad_norm(model.parameters()),
+                    "train/step_loss": loss_batch,
+                }, step=total_microstep_count // configs.gradient_accumulation_steps)
                 loss_batch = 0
                 
-        if (total_step_count - epoch * micro_steps_per_epoch + 1) % configs.gradient_accumulation_steps != 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        if (total_microstep_count - epoch * micro_steps_per_epoch + 1) % configs.gradient_accumulation_steps != 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=configs.max_grad_norm)
             optimizer.step()
             lr_scheduler.step()
             optimizer.zero_grad()
             lr_show = lr_scheduler.get_last_lr()[0] if hasattr(lr_scheduler, "get_last_lr") else optimizer.param_groups[0]["lr"]
             pbar.set_postfix(
-                step=total_step_count // configs.gradient_accumulation_steps,
+                step=total_microstep_count // configs.gradient_accumulation_steps,
                 loss=f"{loss_batch:.4f}",
                 lr=f"{lr_show:.2e}"
             )
@@ -145,22 +196,13 @@ def run_sft(
         if configs.do_eval:
             logging.info(f"Evaluating...")
             load_policy_into_vllm_instance(model, model_eval)
-            eval_sampling_params = SamplingParams(
-                temperature=configs.temperature,
-                top_p=configs.top_p,
-                max_tokens=configs.max_tokens,
-                stop=["</answer>"],
-                include_stop_str_in_output=True
-            )
-
-
-            metric_dict = log_generations(
+            eval_results = log_generations(
                 tokenizer=tokenizer,
                 model_vllm=model_eval,
                 model=model,
                 prompts=eval_prompts,
                 answers=eval_answers,
-                step=total_step_count,
+                step=total_microstep_count // configs.gradient_accumulation_steps,
                 sampling_params=eval_sampling_params,
                 log_to=configs.log_dir,
                 device=configs.train_device, # this may be wrong
@@ -168,17 +210,38 @@ def run_sft(
                 temperature=1.0,
                 top_p=1.0,
                 max_tokens=1024,
-                eval_batch_size= 2 # lower it if OOM
+                eval_batch_size= configs.eval_batch_size # lower it if OOM
             )
             logging.info(f"Eval metric results:")
-            logging.info(metric_dict)
+            logging.info(eval_results)
+            wandb.log({
+                "eval/format_reward": eval_results["count_correct_format"] / eval_results["eval_sample_size"],
+                "eval/answer_reward": eval_results["count_correct_answer"] / eval_results["eval_sample_size"],
+                "eval/total_reward": eval_results["total_reward"] / eval_results["eval_sample_size"],
+                "eval/avg_token_entropy": eval_results["avg_token_entropy"],
+                "eval/avg_response_len": eval_results["avg_response_len"],
+                "eval/avg_correct_response_len": eval_results["avg_correct_response_len"],
+                "eval/avg_incorrect_response_len": eval_results["avg_incorrect_response_len"]
+            }, step=total_microstep_count // configs.gradient_accumulation_steps)
     
-    if configs.checkpoint_dir is not None:
-        step = (total_step_count + 1) // configs.gradient_accumulation_steps
-        ckpt_path = os.path.join(configs.checkpoint_dir, f"ckpt_{configs.num_epochs}epoch_{step}steps")
-        logging.info(f"Saving trained checkpoint to {ckpt_path}")
-        model.save_pretrained(ckpt_path)
-        tokenizer.save_pretrained(ckpt_path)
+        if configs.checkpoint_dir is not None:
+            step = (total_microstep_count + 1) // configs.gradient_accumulation_steps
+            ckpt_path = os.path.join(configs.checkpoint_dir, f"ckpt_epoch_{epoch}_{step}steps")
+            logging.info(f"Saving trained checkpoint to {ckpt_path}")
+            model.save_pretrained(ckpt_path)
+            tokenizer.save_pretrained(ckpt_path)
+
+"""
+original Qeuen2.5-Math-1.5B eval results:
+{'step': 10, 'eval_sample_size': 5000, 'count_correct_format': 856.0, 'count_correct_answer': 142.0, 'total_reward': 142.0, 'avg_token_entropy': 0.7421875, 
+'avg_response_len': 347.2590026855469, 'avg_correct_response_len': 136.34506225585938, 'avg_incorrect_response_len': 353.4240417480469}
+after 1 epoch of SFT:
+{'step': 441, 'eval_sample_size': 5000, 'count_correct_format': 3245.0, 'count_correct_answer': 1493.0, 'total_reward': 1493.0, 'avg_token_entropy': 0.5, 
+'avg_response_len': 145.38539123535156, 'avg_correct_response_len': 105.8305435180664, 'avg_incorrect_response_len': 162.2246856689453}
+after 2 epochs of SFT:
+{'step': 883, 'eval_sample_size': 5000, 'count_correct_format': 4050.0, 'count_correct_answer': 1982.0, 'total_reward': 1982.0, 'avg_token_entropy': 0.396484375, 
+'avg_response_len': 146.68759155273438, 'avg_correct_response_len': 114.66548919677734, 'avg_incorrect_response_len': 167.71737670898438}
+"""
 
 
 

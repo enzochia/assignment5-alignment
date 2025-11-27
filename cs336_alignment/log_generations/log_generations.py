@@ -69,7 +69,7 @@ if __name__ == "__main__":
         model=model,
         prompts=prompts,
         answers=answers,
-        step=10,
+        step=0,
         sampling_params=sampling_params,
         log_to=args.save_to,
         eval_batch_size = 2

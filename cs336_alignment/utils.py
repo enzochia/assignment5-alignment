@@ -511,3 +511,13 @@ def set_random_seed(
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+
+def get_grad_norm(
+    parameters: Iterable[torch.nn.Parameter]
+) -> None:
+    total_norm = math.sqrt(
+        sum((p.grad.data ** 2).sum() if p.grad is not None else 0 
+        for p in parameters)
+    )
+    return total_norm

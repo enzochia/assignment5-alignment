@@ -30,13 +30,14 @@ class SFTConfig:
     batch_size: int = field(default = 16)
     gradient_accumulation_steps: int = field(default = 4)
     num_epochs: int = field(default = 4)
+    max_grad_norm: float = field(default = 1.0)
 
     # Logging parameters
-    wandb_entity: Optional[str] = field(default=None)
-    wandb_project: Optional[str] = field(default=None)
+    wandb_entity: Optional[str] = field(default="enzojia-personal-research-and-development")
+    wandb_project: Optional[str] = field(default="SFT-Qwen2.5-Math-1.5B")
     wandb_run_name: Optional[str] = field(default=None)
     log_every: Optional[int] = field(default=None)
-    eval_every: Optional[int] = field(default=None)
+    eval_every: Optional[int] = field(default=10)
     eval_iters: Optional[int] = field(default=100)
 
     # Eval parameter
@@ -45,6 +46,8 @@ class SFTConfig:
     top_p: float = field(default = 1)
     max_tokens: int = field(default = 1024)
     gpu_memory_utilization: float = field(default=0.275)
+    eval_batch_size: int = field(default = 8)
+    eval_size: int = field(default = float("inf"))
 
 
     def __post_init__(self):
