@@ -462,21 +462,60 @@ def train_grpo(
         weight_decay=configs.weight_decay,
         betas=configs.betas
     )
-    total_steps = configs.n_grpo_steps * configs.n_train_steps_per_rollout_batch * configs.rollout_batch_size // configs.train_batch_size
+    total_train_size = configs.n_grpo_steps * configs.n_train_steps_per_rollout_batch * configs.rollout_batch_size
+    total_optim_steps = total_train_size * configs.rollout_batch_size * configs.n_train_steps_per_rollout_batch \
+                        // (configs.train_batch_size ** 2)
+    # there could be multiple rollout batches per optim step which takes one train batch of data
+    total_rollouts = total_train_size // configs.train_batch_size
+    logging.info(f"Total training size: {total_train_size}, total optim steps: {total_optim_steps}, total rollouts: {total_rollouts}.")
     lr_scheduler = get_scheduler(
         name=configs.lr_scheduler,
         optimizer=optimizer,
-        num_warmup_steps=0.05 * total_steps,
-        num_training_steps=total_steps,
+        num_warmup_steps=configs.lr_warmup_percent * total_optim_steps,
+        num_training_steps=total_optim_steps,
         scheduler_specific_kwargs=configs.lr_scheduler_kwargs
     )
 
     sampling_params, sampling_params_eval = get_sampling_params(configs)
 
-    total_step_count = 0
+    if (configs.do_eval and 
+        configs.do_eval_before_train):
+        model.eval()
+        load_policy_into_vllm_instance(model, model_inf)
+
+        eval_results = log_generations(
+            tokenizer=tokenizer,
+            model_vllm=model_inf,
+            model=model,
+            prompts=eval_prompts,
+            answers=eval_answers,
+            step=0,
+            run_name=configs.wandb_run_name,
+            sampling_params=sampling_params_eval,
+            log_to=configs.log_dir,
+            device=configs.eval_device,
+            reward=configs.prompt,
+            temperature=configs.temperature,
+            top_p=configs.top_p,
+            max_tokens=configs.max_tokens,
+            eval_batch_size=configs.eval_batch_size
+        )
+        logging.info(eval_results)
+        wandb.log({
+            "eval/format_reward": eval_results["count_correct_format"] / eval_results["eval_sample_size"],
+            "eval/answer_reward": eval_results["count_correct_answer"] / eval_results["eval_sample_size"],
+            "eval/total_reward": eval_results["total_reward"] / eval_results["eval_sample_size"],
+            "eval/avg_token_entropy": eval_results["avg_token_entropy"],
+            "eval/avg_response_len": eval_results["avg_response_len"],
+            "eval/avg_correct_response_len": eval_results["avg_correct_response_len"],
+            "eval/avg_incorrect_response_len": eval_results["avg_incorrect_response_len"]
+        }, step=0)
+
+    micro_step_count = 0
     model.train()
-    pbar = tqdm(total=configs.n_grpo_steps, desc="GRPO", dynamic_ncols=True)
-    for step, (problems, _, _, _, answers) in enumerate(islice(infinite_dataloader(train_dataloader), configs.n_grpo_steps)):
+    pbar = tqdm(total=total_optim_steps, desc="GRPO", dynamic_ncols=True)
+    for step, (problems, _, _, _, answers) in enumerate(islice(infinite_dataloader(train_dataloader), 
+                                                               total_rollouts)):
         prompts = [prompt_template.format(question=problem) for problem in problems]
         outputs = model_inf.generate(prompts, sampling_params=sampling_params, use_tqdm=False)
         batch_data = {"prompts": [], "outputs": [], "answers": []}
@@ -523,7 +562,6 @@ def train_grpo(
         model.train()
         step_loss = 0
         for grpo_step in range(configs.n_train_steps_per_rollout_batch):
-            micro_step_count = 0
             for micro_step in range(configs.n_microbatches_per_rollout_batch + 1):
                 idx_start = micro_step * configs.micro_train_batch_size
                 if idx_start < configs.rollout_batch_size:
@@ -552,12 +590,13 @@ def train_grpo(
                     wandb.log({
                         "train/micro_step_loss": loss.item(),
                         "train/step_reward": step_reward / configs.rollout_batch_size,
-                    }, step=total_step_count * configs.rollout_batch_size + micro_step_count - 1)
+                    }, step=micro_step_count - 1)
                     
                     step_loss += loss
                     if ((micro_step_count % configs.gradient_accumulation_steps == 0) or
-                        (micro_step_count == configs.rollout_batch_size)):
+                        ((micro_step - 1) * configs.micro_train_batch_size + (idx_end - idx_start) == total_train_size)):
                         grad_norm = clip_grad_norm_(model.parameters(), max_norm=configs.grad_clip)
+                        print(f"Taking an optimization step at micro_step_count {micro_step_count}, step {step}, grpo_step {grpo_step}.")
                         optimizer.step()
                         lr_scheduler.step()
                         optimizer.zero_grad()
@@ -569,7 +608,7 @@ def train_grpo(
                             "train/lr": lr,
                             "train/grad_norm": grad_norm,
                             "train/step_loss": step_loss.item()
-                        }, step=total_step_count * configs.rollout_batch_size + micro_step_count - 1)
+                        }, step=micro_step_count - 1)
                         pbar.set_postfix(
                             step=step,
                             lr=f"{lr:.2e}",
@@ -578,43 +617,44 @@ def train_grpo(
                             step_reward=f"{step_reward}/{configs.rollout_batch_size}",
                         )
                         step_loss = 0
-                        total_step_count += 1
 
-        if (configs.do_eval and
-            (step + configs.grpo_start_from) % configs.eval_every == 0):
-            model.eval()
-            load_policy_into_vllm_instance(model, model_inf)
+                        if (configs.do_eval and
+                            (((micro_step_count // configs.gradient_accumulation_steps) % configs.eval_every == 0) or
+                            (step == total_rollouts - 1))):
+                            model.eval()
+                            load_policy_into_vllm_instance(model, model_inf)
 
-            eval_results = log_generations(
-                tokenizer=tokenizer,
-                model_vllm=model_inf,
-                model=model,
-                prompts=eval_prompts,
-                answers=eval_answers,
-                step=step,
-                sampling_params=sampling_params_eval,
-                log_to=configs.log_dir,
-                device=configs.eval_device,
-                reward=configs.prompt,
-                temperature=configs.temperature,
-                top_p=configs.top_p,
-                max_tokens=configs.max_tokens,
-                eval_batch_size=configs.eval_batch_size
-            )
-            logging.info(eval_results)
-            wandb.log({
-                "eval/format_reward": eval_results["count_correct_format"] / eval_results["eval_sample_size"],
-                "eval/answer_reward": eval_results["count_correct_answer"] / eval_results["eval_sample_size"],
-                "eval/total_reward": eval_results["total_reward"] / eval_results["eval_sample_size"],
-                "eval/avg_token_entropy": eval_results["avg_token_entropy"],
-                "eval/avg_response_len": eval_results["avg_response_len"],
-                "eval/avg_correct_response_len": eval_results["avg_correct_response_len"],
-                "eval/avg_incorrect_response_len": eval_results["avg_incorrect_response_len"]
-            }, step=total_step_count * configs.rollout_batch_size - 1)
-        pbar.update(1)
+                            eval_results = log_generations(
+                                tokenizer=tokenizer,
+                                model_vllm=model_inf,
+                                model=model,
+                                prompts=eval_prompts,
+                                answers=eval_answers,
+                                step=micro_step_count // configs.gradient_accumulation_steps,
+                                run_name=configs.wandb_run_name,
+                                sampling_params=sampling_params_eval,
+                                log_to=configs.log_dir,
+                                device=configs.eval_device,
+                                reward=configs.prompt,
+                                temperature=configs.temperature,
+                                top_p=configs.top_p,
+                                max_tokens=configs.max_tokens,
+                                eval_batch_size=configs.eval_batch_size
+                            )
+                            logging.info(eval_results)
+                            wandb.log({
+                                "eval/format_reward": eval_results["count_correct_format"] / eval_results["eval_sample_size"],
+                                "eval/answer_reward": eval_results["count_correct_answer"] / eval_results["eval_sample_size"],
+                                "eval/total_reward": eval_results["total_reward"] / eval_results["eval_sample_size"],
+                                "eval/avg_token_entropy": eval_results["avg_token_entropy"],
+                                "eval/avg_response_len": eval_results["avg_response_len"],
+                                "eval/avg_correct_response_len": eval_results["avg_correct_response_len"],
+                                "eval/avg_incorrect_response_len": eval_results["avg_incorrect_response_len"]
+                            }, step=micro_step_count - 1)
+                        pbar.update(1)
 
     if configs.checkpoint_dir is not None:
-        ckpt_path = os.path.join(configs.checkpoint_dir, f"ckpt_{step}rollouts_{total_step_count}steps")
+        ckpt_path = os.path.join(configs.checkpoint_dir, f"{configs.wandb_run_name}/ckpt_{total_train_size}_samples")
         logging.info(f"Saving trained checkpoint to {ckpt_path}")
         model.save_pretrained(ckpt_path)
         tokenizer.save_pretrained(ckpt_path)

@@ -104,6 +104,7 @@ def run_sft(
             prompts=eval_prompts,
             answers=eval_answers,
             step=0,
+            run_name=configs.wandb_run_name,
             sampling_params=eval_sampling_params,
             log_to=configs.log_dir,
             device=configs.train_device, # this may be wrong
@@ -163,10 +164,9 @@ def run_sft(
             loss_batch += loss.item()
 
             if (total_microstep_count - epoch * micro_steps_per_epoch + 1) % configs.gradient_accumulation_steps == 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=configs.max_grad_norm)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=configs.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
-                optimizer.zero_grad()
                 lr_show = lr_scheduler.get_last_lr()[0] if hasattr(lr_scheduler, "get_last_lr") else optimizer.param_groups[0]["lr"]
                 pbar.set_postfix(
                     step=total_microstep_count // configs.gradient_accumulation_steps,
@@ -175,9 +175,10 @@ def run_sft(
                 )
                 wandb.log({
                     "train/lr": lr_show,
-                    "train/grad_norm": get_grad_norm(model.parameters()),
+                    "train/grad_norm": grad_norm,
                     "train/step_loss": loss_batch,
-                }, step=total_microstep_count // configs.gradient_accumulation_steps)
+                }, step=total_microstep_count)
+                optimizer.zero_grad()
                 loss_batch = 0
                 
         if (total_microstep_count - epoch * micro_steps_per_epoch + 1) % configs.gradient_accumulation_steps != 0:
@@ -203,6 +204,7 @@ def run_sft(
                 prompts=eval_prompts,
                 answers=eval_answers,
                 step=total_microstep_count // configs.gradient_accumulation_steps,
+                run_name=configs.wandb_run_name,
                 sampling_params=eval_sampling_params,
                 log_to=configs.log_dir,
                 device=configs.train_device, # this may be wrong
@@ -222,25 +224,16 @@ def run_sft(
                 "eval/avg_response_len": eval_results["avg_response_len"],
                 "eval/avg_correct_response_len": eval_results["avg_correct_response_len"],
                 "eval/avg_incorrect_response_len": eval_results["avg_incorrect_response_len"]
-            }, step=total_microstep_count // configs.gradient_accumulation_steps)
+            }, step=total_microstep_count)
     
         if configs.checkpoint_dir is not None:
             step = (total_microstep_count + 1) // configs.gradient_accumulation_steps
-            ckpt_path = os.path.join(configs.checkpoint_dir, f"ckpt_epoch_{epoch}_{step}steps")
+            ckpt_path = os.path.join(configs.checkpoint_dir, f"{configs.wandb_run_name}/ckpt_epoch_{epoch}_{step}steps")
             logging.info(f"Saving trained checkpoint to {ckpt_path}")
             model.save_pretrained(ckpt_path)
             tokenizer.save_pretrained(ckpt_path)
 
 """
-original Qeuen2.5-Math-1.5B eval results:
-{'step': 10, 'eval_sample_size': 5000, 'count_correct_format': 856.0, 'count_correct_answer': 142.0, 'total_reward': 142.0, 'avg_token_entropy': 0.7421875, 
-'avg_response_len': 347.2590026855469, 'avg_correct_response_len': 136.34506225585938, 'avg_incorrect_response_len': 353.4240417480469}
-after 1 epoch of SFT:
-{'step': 441, 'eval_sample_size': 5000, 'count_correct_format': 3245.0, 'count_correct_answer': 1493.0, 'total_reward': 1493.0, 'avg_token_entropy': 0.5, 
-'avg_response_len': 145.38539123535156, 'avg_correct_response_len': 105.8305435180664, 'avg_incorrect_response_len': 162.2246856689453}
-after 2 epochs of SFT:
-{'step': 883, 'eval_sample_size': 5000, 'count_correct_format': 4050.0, 'count_correct_answer': 1982.0, 'total_reward': 1982.0, 'avg_token_entropy': 0.396484375, 
-'avg_response_len': 146.68759155273438, 'avg_correct_response_len': 114.66548919677734, 'avg_incorrect_response_len': 167.71737670898438}
 """
 
 

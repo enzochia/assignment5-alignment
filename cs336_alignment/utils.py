@@ -399,6 +399,7 @@ def log_generations(
     prompts: List[str],
     answers: List[str],
     step: int,
+    run_name: str,
     sampling_params: SamplingParams = None,
     log_to: str | os.PathLike | None = None,
     device: str | torch.device | None = "cuda",
@@ -473,6 +474,7 @@ def log_generations(
         "avg_incorrect_response_len": avg_incorrect_response_len.item()
     }
     if log_to is not None:
+        log_to = os.path.join(log_to, f"{run_name}")
         metric_path = os.path.join(log_to, f"eval_metrics_step_{step}.json")
         if not os.path.exists(log_to):
             os.makedirs(log_to)

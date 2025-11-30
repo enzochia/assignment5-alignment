@@ -9,11 +9,11 @@ uv run --active -m cs336_alignment.sft.run_sft \
   --log_dir outputs/logs/ \
   --lr_scheduler cosine_with_min_lr \
   --lr 0.00004 \
-  --batch_size 16 \
-  --gradient_accumulation_steps 4 \
-  --num_epochs 10 \
+  --batch_size 256 \
+  --gradient_accumulation_steps 32 \
+  --num_epochs 3 \
   --gpu_memory_utilization 0.275 \
   --do_eval \
   --eval_batch_size 8 \
   --wandb_project SFT-Qwen2.5-Math-1.5B-dev \
-  --wandb_run_name sft_dev_run_00
+  --wandb_run_name sft_dev_run_bs256_lr4e-5

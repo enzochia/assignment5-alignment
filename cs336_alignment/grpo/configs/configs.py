@@ -21,7 +21,7 @@ class GRPOConfig:
     eval_device: str = field(default = "cuda:1")
 
     # Training parameters
-    checkpoint_dir: str = field(default = "outputs/ckpt/")
+    checkpoint_dir: str = field(default = None)
     log_dir: str = field(default = "outputs/logs/")
     seed: int = field(default = 2048)
     loss_type: Literal["no_baseline", "reinforce_with_baseline", "grpo_clip"] = field(default="reinforce_with_baseline")
@@ -41,6 +41,7 @@ class GRPOConfig:
     lr_scheduler: str = field(default = "cosine_with_min_lr")
     lr: float = field(default = 4e-5)
     lr_scheduler_kwargs: Dict[str, float] = field(default_factory = lambda : {"min_lr_rate": 0.1})
+    lr_warmup_percent: float = field(default = 0.03)
     weight_decay: float = field(default = 0)
     betas: Tuple[float] = field(default_factory = lambda : (0.9, 0.95))
 
