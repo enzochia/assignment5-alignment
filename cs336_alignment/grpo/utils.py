@@ -117,6 +117,7 @@ def compute_grpo_KL_penalty_term(
     policy_log_probs: torch.Tensor,
     old_log_probs: torch.Tensor
 ) -> torch.Tensor:
+    # print(f"===================== dimension of policy: {policy_log_probs.size()}, diff between policy and old policy log probs: {(policy_log_probs - old_log_probs).abs().max().item()} =====================")
     ratio = torch.exp(old_log_probs - policy_log_probs).to(torch.float32)
     return (ratio - torch.log(ratio) - 1).to(policy_log_probs.dtype)
 
@@ -150,7 +151,12 @@ def compute_grpo_clip_loss_no_kl_term(
              (1 - cliprange) * advantages * (advantages < 0)
     advantages_importance_sampled = torch.exp(policy_log_probs - old_log_probs) * advantages
     loss = -torch.min(advantages_importance_sampled, g_clip)
-    return loss, {}
+    kl_penalty_trerm = compute_KL_penalty_term(
+                           configs=configs,
+                           policy_log_probs=policy_log_probs,
+                           old_log_probs=old_log_probs,
+                       )
+    return loss, {"kl_penalty_term": kl_penalty_trerm}
 
 def compute_grpo_clip_loss_with_kl_term(
     configs: GRPOConfig,
@@ -162,13 +168,13 @@ def compute_grpo_clip_loss_with_kl_term(
     g_clip = (1 + cliprange) * advantages * (advantages >= 0) + \
              (1 - cliprange) * advantages * (advantages < 0)
     advantages_importance_sampled = torch.exp(policy_log_probs - old_log_probs) * advantages
-    loss = -torch.min(advantages_importance_sampled, g_clip) + \
-        configs.KL_beta * compute_KL_penalty_term(
-            configs=configs,
-            policy_log_probs=policy_log_probs,
-            old_log_probs=old_log_probs,
-        )
-    return loss, {}
+    kl_penalty_trerm = compute_KL_penalty_term(
+                           configs=configs,
+                           policy_log_probs=policy_log_probs,
+                           old_log_probs=old_log_probs,
+                       )
+    loss = -torch.min(advantages_importance_sampled, g_clip) + configs.KL_beta * kl_penalty_trerm
+    return loss, {"kl_penalty_term": kl_penalty_trerm}
 
 
 def compute_grpo_clip_loss_max_min(
@@ -187,7 +193,12 @@ def compute_grpo_clip_loss_max_min(
         torch.min(pg1, pg2),
         torch.max(pg1, pg2),
     )
-    return loss, {}
+    kl_penalty_trerm = compute_KL_penalty_term(
+                           configs=configs,
+                           policy_log_probs=policy_log_probs,
+                           old_log_probs=old_log_probs,
+                       )
+    return loss, {"kl_penalty_term": kl_penalty_trerm}
 
 
 def compute_grpo_clip_loss_only_clip_term(
@@ -202,7 +213,12 @@ def compute_grpo_clip_loss_only_clip_term(
                              1 - cliprange, 1 + cliprange)
     # [bs, seq_len]
     loss = -importance * advantages
-    return loss, {}
+    kl_penalty_trerm = compute_KL_penalty_term(
+                           configs=configs,
+                           policy_log_probs=policy_log_probs,
+                           old_log_probs=old_log_probs,
+                       )
+    return loss, {"kl_penalty_term": kl_penalty_trerm}
 
 
 def compute_grpo_clip_loss(
@@ -481,8 +497,6 @@ def train_grpo(
     if (configs.do_eval and 
         configs.do_eval_before_train):
         model.eval()
-        load_policy_into_vllm_instance(model, model_inf)
-
         eval_results = log_generations(
             tokenizer=tokenizer,
             model_vllm=model_inf,
@@ -517,6 +531,7 @@ def train_grpo(
     for step, (problems, _, _, _, answers) in enumerate(islice(infinite_dataloader(train_dataloader), 
                                                                total_rollouts)):
         prompts = [prompt_template.format(question=problem) for problem in problems]
+        load_policy_into_vllm_instance(model, model_inf)
         outputs = model_inf.generate(prompts, sampling_params=sampling_params, use_tqdm=False)
         batch_data = {"prompts": [], "outputs": [], "answers": []}
         for p, a, o in zip(prompts, answers, outputs):
@@ -575,10 +590,11 @@ def train_grpo(
                     )
                     old_log_probs_tensor = old_log_probs_tensor_full_rollout[idx_start:idx_end] if configs.off_policy else \
                                            log_probs_dict["log_probs"].detach()
+                    response_mask = tokenized_results["response_mask"][idx_start:idx_end]
                     loss, metadata = grpo_microbatch_train_step(
                         configs=configs,
                         policy_log_probs=log_probs_dict["log_probs"],
-                        response_mask=tokenized_results["response_mask"][idx_start:idx_end],
+                        response_mask=response_mask,
                         gradient_accumulation_steps=configs.gradient_accumulation_steps,
                         loss_type=configs.loss_type,
                         raw_rewards=raw_rewards[idx_start:idx_end].unsqueeze(-1),
@@ -587,16 +603,17 @@ def train_grpo(
                         cliprange=configs.cliprange,
                     )
                     micro_step_count += 1
-                    wandb.log({
+                    log_dict = {
                         "train/micro_step_loss": loss.item(),
                         "train/step_reward": step_reward / configs.rollout_batch_size,
-                    }, step=micro_step_count - 1)
+                    }
+                    log_dict.update({f"train/{k}": masked_mean(v, response_mask).item() for k, v in metadata.items()})
+                    wandb.log(log_dict, step=micro_step_count - 1)
                     
                     step_loss += loss
                     if ((micro_step_count % configs.gradient_accumulation_steps == 0) or
                         ((micro_step - 1) * configs.micro_train_batch_size + (idx_end - idx_start) == total_train_size)):
                         grad_norm = clip_grad_norm_(model.parameters(), max_norm=configs.grad_clip)
-                        print(f"Taking an optimization step at micro_step_count {micro_step_count}, step {step}, grpo_step {grpo_step}.")
                         optimizer.step()
                         lr_scheduler.step()
                         optimizer.zero_grad()
