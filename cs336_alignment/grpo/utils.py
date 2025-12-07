@@ -117,7 +117,6 @@ def compute_grpo_KL_penalty_term(
     policy_log_probs: torch.Tensor,
     old_log_probs: torch.Tensor
 ) -> torch.Tensor:
-    # print(f"===================== dimension of policy: {policy_log_probs.size()}, diff between policy and old policy log probs: {(policy_log_probs - old_log_probs).abs().max().item()} =====================")
     ratio = torch.exp(old_log_probs - policy_log_probs).to(torch.float32)
     return (ratio - torch.log(ratio) - 1).to(policy_log_probs.dtype)
 
@@ -478,12 +477,15 @@ def train_grpo(
         weight_decay=configs.weight_decay,
         betas=configs.betas
     )
-    total_train_size = configs.n_grpo_steps * configs.n_train_steps_per_rollout_batch * configs.rollout_batch_size
-    total_optim_steps = total_train_size * configs.rollout_batch_size * configs.n_train_steps_per_rollout_batch \
-                        // (configs.train_batch_size ** 2)
+    # assuming configs.n_grpo_steps % configs.n_train_steps_per_rollout_batch == 0
+    total_rollout_size = configs.n_grpo_steps * configs.rollout_batch_size // configs.n_train_steps_per_rollout_batch
+    # each rollout is reused configs.n_train_steps_per_rollout_batch times
+    total_train_size = configs.n_grpo_steps * configs.rollout_batch_size
+    total_optim_steps = total_train_size // configs.train_batch_size
     # there could be multiple rollout batches per optim step which takes one train batch of data
-    total_rollouts = total_train_size // configs.train_batch_size
-    logging.info(f"Total training size: {total_train_size}, total optim steps: {total_optim_steps}, total rollouts: {total_rollouts}.")
+    total_rollouts = total_rollout_size // configs.rollout_batch_size
+    logging.info(f"Total training size: {total_train_size}, total optim steps: {total_optim_steps}, total rollout data size: "
+                 f"{total_rollout_size}, total rollouts: {total_rollouts}.")
     lr_scheduler = get_scheduler(
         name=configs.lr_scheduler,
         optimizer=optimizer,

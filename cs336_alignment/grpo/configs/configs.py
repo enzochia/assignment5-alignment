@@ -40,7 +40,7 @@ class GRPOConfig:
     # Optim parameters
     lr_scheduler: str = field(default = "cosine_with_min_lr")
     lr: float = field(default = 4e-5)
-    lr_scheduler_kwargs: Dict[str, float] = field(default_factory = lambda : {"min_lr_rate": 0.1})
+    lr_scheduler_min_rate: float = field(default = 0.1)
     lr_warmup_percent: float = field(default = 0.03)
     weight_decay: float = field(default = 0)
     betas: Tuple[float] = field(default_factory = lambda : (0.9, 0.95))
@@ -93,6 +93,7 @@ class GRPOConfig:
         # self.off_policy = self.n_grpo_iterations > 1
         self.off_policy = self.n_train_steps_per_rollout_batch > 1
 
-        assert ((self.loss_type != "grpo_clip") or self.off_policy)
+        # assert ((self.loss_type != "grpo_clip") or self.off_policy)
 
         self.grpo_start_from = 0 if self.do_eval_before_train else 1
+        self.lr_scheduler_kwargs: Dict[str, float] = {"min_lr_rate": self.lr_scheduler_min_rate}
