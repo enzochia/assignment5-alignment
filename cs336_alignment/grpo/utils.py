@@ -25,10 +25,7 @@ from cs336_alignment.drgrpo_grader import (
     r1_zero_reward_fn,
     question_only_reward_fn
 )
-from cs336_alignment.data_util import (
-    MATH_SFT_Dataset,
-    collate_fn_train
-)
+from cs336_alignment.data_util import Train_Dataset
 from .configs import GRPOConfig
 from itertools import cycle, islice
 from tqdm import tqdm
@@ -255,7 +252,7 @@ def compute_grpo_clip_loss(
     if loss_func is None:
         raise ValueError(f"Unknown loss type {configs.grpo_clip_loss_type}")
 
-    return compute_grpo_clip_loss_no_kl_term(
+    return loss_func(
         configs=configs,
         advantages=advantages,
         policy_log_probs=policy_log_probs,
@@ -416,7 +413,8 @@ def get_inference_model(configs):
         device=configs.eval_device,
         gpu_memory_utilization=configs.gpu_memory_utilization if configs.train_device == configs.eval_device else 0.9,
         dtype=configs.train_dtype,
-        seed=configs.seed
+        seed=configs.seed,
+        enforce_eager=True
     )
     return model_inf
 
@@ -425,6 +423,69 @@ def infinite_dataloader(loader):
     while True:
         for batch in loader:
             yield batch
+
+def evaluate_model(
+    configs: GRPOConfig,
+    tokenizer: AutoTokenizer,
+    model: torch.nn.Module,
+    model_inf: torch.nn.Module,
+    eval_prompts: Dict[str, List[str]],
+    eval_answers: Dict[str, List[str]],
+    step_count: int,
+    sampling_params_eval: SamplingParams
+):
+    was_training = model.training
+    model.eval()
+    torch.cuda.empty_cache()
+    for eval_data_name in configs.eval_data_names:
+        logging.info(f"Evaluating on {eval_data_name} dataset.")
+        eval_results = log_generations(
+            eval_data_name=eval_data_name,
+            tokenizer=tokenizer,
+            model_vllm=model_inf,
+            model=model,
+            prompts=eval_prompts[eval_data_name],
+            answers=eval_answers[eval_data_name],
+            step=step_count,
+            run_name=configs.wandb_run_name,
+            sampling_params=sampling_params_eval,
+            log_to=configs.log_dir,
+            device=configs.eval_device,
+            reward=configs.prompt,
+            temperature=configs.temperature,
+            top_p=configs.top_p,
+            max_tokens=configs.max_tokens,
+            eval_batch_size=configs.eval_batch_size
+        )
+        logging.info(eval_results)
+        wandb.log({
+            "eval/" + eval_data_name + "_format_reward": eval_results["count_correct_format"] / eval_results["eval_sample_size"],
+            "eval/" + eval_data_name + "_answer_reward": eval_results["count_correct_answer"] / eval_results["eval_sample_size"],
+            "eval/" + eval_data_name + "_total_reward": eval_results["total_reward"] / eval_results["eval_sample_size"],
+            "eval/" + eval_data_name + "_avg_token_entropy": eval_results["avg_token_entropy"],
+            "eval/" + eval_data_name + "_avg_response_len": eval_results["avg_response_len"],
+            "eval/" + eval_data_name + "_avg_correct_response_len": eval_results["avg_correct_response_len"],
+            "eval/" + eval_data_name + "_avg_incorrect_response_len": eval_results["avg_incorrect_response_len"]
+        }, step=step_count)
+    if was_training:
+        model.train()
+
+def get_eval_data(
+    configs: GRPOConfig
+):
+    eval_prompts: Dict[str, List[str]] = {}
+    eval_answers: Dict[str, List[str]] = {}
+    prompt_template = load_prompt_template(configs.prompt_template_path)
+    for eval_data_name in configs.eval_data_names:
+        questions, answers = load_eval_data(eval_data_name, configs.data_path_dict[eval_data_name]["eval"])
+        prompts = [prompt_template.format(question=question) for question in questions]
+        if len(prompts) > configs.eval_size:
+            prompts = prompts[:configs.eval_size]
+            answers = answers[:configs.eval_size]
+        eval_prompts[eval_data_name] = prompts
+        eval_answers[eval_data_name] = answers
+        print(f"Loaded {len(prompts)} eval prompts, {len(answers)} eval answers for {eval_data_name}.")
+    return eval_prompts, eval_answers
 
 
 def train_grpo(
@@ -448,27 +509,19 @@ def train_grpo(
         tokenizer.pad_token = tokenizer.eos_token
 
     logging.info(f"Loading and processing train dataset.")
-    train_data = MATH_SFT_Dataset(configs.data_train_path)
+    train_data = Train_Dataset(configs)
     train_dataloader = DataLoader(
         train_data,
         batch_size=configs.n_prompts_per_rollout_batch,
         shuffle=True,
-        collate_fn=collate_fn_train
+        collate_fn=train_data.collate_fn_train
     )
     micro_steps_per_epoch = len(train_dataloader)
     logging.info(f"length of train_data: {len(train_data)}, length of train_dataloader: {len(train_dataloader)}.")
- 
-    model_inf = get_inference_model(configs)
 
-    logging.info(f"Loading and processing eval dataset.")
-    eval_questions, eval_answers = load_eval_data("MATH", configs.data_eval_path)
+    model_inf = get_inference_model(configs)
     prompt_template = load_prompt_template(configs.prompt_template_path)
-    eval_prompts = [prompt_template.format(question=question) for question in eval_questions]
-    print(f"Loaded {len(eval_prompts)} eval prompts, {len(eval_answers)} eval answers.")
-    if len(eval_prompts) > configs.eval_size:
-        eval_prompts = eval_prompts[:configs.eval_size]
-        eval_answers = eval_answers[:configs.eval_size]
-    print(f"Using {len(eval_prompts)} eval prompts, {len(eval_answers)} eval answers for evaluation.")
+    eval_prompts, eval_answers = get_eval_data(configs)
 
     logging.info(f"Initializing optimizer and lr scheduler.")
     optimizer = AdamW(
@@ -498,34 +551,16 @@ def train_grpo(
 
     if (configs.do_eval and 
         configs.do_eval_before_train):
-        model.eval()
-        eval_results = log_generations(
+        evaluate_model(
+            configs=configs,
             tokenizer=tokenizer,
-            model_vllm=model_inf,
             model=model,
-            prompts=eval_prompts,
-            answers=eval_answers,
-            step=0,
-            run_name=configs.wandb_run_name,
-            sampling_params=sampling_params_eval,
-            log_to=configs.log_dir,
-            device=configs.eval_device,
-            reward=configs.prompt,
-            temperature=configs.temperature,
-            top_p=configs.top_p,
-            max_tokens=configs.max_tokens,
-            eval_batch_size=configs.eval_batch_size
+            model_inf=model_inf,
+            eval_prompts=eval_prompts,
+            eval_answers=eval_answers,
+            step_count=0,
+            sampling_params_eval=sampling_params_eval
         )
-        logging.info(eval_results)
-        wandb.log({
-            "eval/format_reward": eval_results["count_correct_format"] / eval_results["eval_sample_size"],
-            "eval/answer_reward": eval_results["count_correct_answer"] / eval_results["eval_sample_size"],
-            "eval/total_reward": eval_results["total_reward"] / eval_results["eval_sample_size"],
-            "eval/avg_token_entropy": eval_results["avg_token_entropy"],
-            "eval/avg_response_len": eval_results["avg_response_len"],
-            "eval/avg_correct_response_len": eval_results["avg_correct_response_len"],
-            "eval/avg_incorrect_response_len": eval_results["avg_incorrect_response_len"]
-        }, step=0)
 
     micro_step_count = 0
     model.train()
@@ -640,36 +675,16 @@ def train_grpo(
                         if (configs.do_eval and
                             (((micro_step_count // configs.gradient_accumulation_steps) % configs.eval_every == 0) or
                             (step == total_rollouts - 1))):
-                            model.eval()
-                            load_policy_into_vllm_instance(model, model_inf)
-
-                            eval_results = log_generations(
+                            evaluate_model(
+                                configs=configs,
                                 tokenizer=tokenizer,
-                                model_vllm=model_inf,
                                 model=model,
-                                prompts=eval_prompts,
-                                answers=eval_answers,
-                                step=micro_step_count // configs.gradient_accumulation_steps,
-                                run_name=configs.wandb_run_name,
-                                sampling_params=sampling_params_eval,
-                                log_to=configs.log_dir,
-                                device=configs.eval_device,
-                                reward=configs.prompt,
-                                temperature=configs.temperature,
-                                top_p=configs.top_p,
-                                max_tokens=configs.max_tokens,
-                                eval_batch_size=configs.eval_batch_size
+                                model_inf=model_inf,
+                                eval_prompts=eval_prompts,
+                                eval_answers=eval_answers,
+                                step_count=micro_step_count - 1,
+                                sampling_params_eval=sampling_params_eval
                             )
-                            logging.info(eval_results)
-                            wandb.log({
-                                "eval/format_reward": eval_results["count_correct_format"] / eval_results["eval_sample_size"],
-                                "eval/answer_reward": eval_results["count_correct_answer"] / eval_results["eval_sample_size"],
-                                "eval/total_reward": eval_results["total_reward"] / eval_results["eval_sample_size"],
-                                "eval/avg_token_entropy": eval_results["avg_token_entropy"],
-                                "eval/avg_response_len": eval_results["avg_response_len"],
-                                "eval/avg_correct_response_len": eval_results["avg_correct_response_len"],
-                                "eval/avg_incorrect_response_len": eval_results["avg_incorrect_response_len"]
-                            }, step=micro_step_count - 1)
                         pbar.update(1)
 
     if configs.checkpoint_dir is not None:
@@ -677,6 +692,3 @@ def train_grpo(
         logging.info(f"Saving trained checkpoint to {ckpt_path}")
         model.save_pretrained(ckpt_path)
         tokenizer.save_pretrained(ckpt_path)
-
-"""
-"""

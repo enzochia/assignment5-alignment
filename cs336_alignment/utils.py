@@ -23,7 +23,8 @@ def init_vllm(
     device: str | torch.device | None = "cuda:0",
     gpu_memory_utilization: float = 0.9,
     dtype: torch.dtype | None = torch.bfloat16,
-    seed: int = 4096
+    seed: int = 4096,
+    enforce_eager: bool = True
 ) -> LLM:
     """
     Start the inference process, here we use vLLM to hold a model on a GPU separate from the policy.
@@ -42,7 +43,8 @@ def init_vllm(
             device=device,
             dtype=dtype,
             enable_prefix_caching=True,
-            gpu_memory_utilization=gpu_memory_utilization
+            gpu_memory_utilization=gpu_memory_utilization,
+            enforce_eager=enforce_eager
         )
     return llm
 
@@ -61,21 +63,22 @@ def load_policy_into_vllm_instance(
 
 def load_eval_data(
         data_name: str,
-        path: str | os.PathLike
+        path_list: List[str | os.PathLike]
     ) -> Tuple[Any]:
     questions: List[str] = []
     answers: List[str] = [] 
     question_label: Dict[str, str] = {"MATH": "problem", "gsm8k": "question"}
-    answer_label: Dict[str, str] = {"MATH": "answer", "gsm8k": "ground_truth"}
-    with open(path, "r", encoding="utf-8") as f:
-        logging.info(f"Loading eval {data_name} data from {path}.")
-        for line in f:
-            try:
-                data = json.loads(line)
-                questions.append(data[question_label[data_name]])
-                answers.append(data[answer_label[data_name]])
-            except Exception as e:
-                logging.error(e)
+    answer_label: Dict[str, str] = {"MATH": "answer", "gsm8k": "answer"}
+    for path in path_list:
+        with open(path, "r", encoding="utf-8") as f:
+            logging.info(f"Loading eval {data_name} data from {path}.")
+            for line in f:
+                try:
+                    data = json.loads(line)
+                    questions.append(data[question_label[data_name]])
+                    answers.append(data[answer_label[data_name]])
+                except Exception as e:
+                    logging.error(e)
     logging.info(f"Loading completed.")
     return questions, answers
 
@@ -88,6 +91,7 @@ def load_prompt_template(path: str | os.PathLike) -> str:
 
 def evaluate_vllm(
     vllm_model: LLM,
+    eval_data_name: str,
     reward_fn: Callable[[str, str], dict[str, float]],
     prompts: List[str],
     eval_sampling_params: SamplingParams,
@@ -104,6 +108,9 @@ def evaluate_vllm(
     for output, answer in zip(outputs, answers):
         prompt = output.prompt
         generated_text = output.outputs[0].text
+        if ((eval_data_name == "gsm8k") and 
+            ("\n####" in answer)):
+            answer = answer.split("\n####")[-1].strip()
         reward = reward_fn(generated_text, answer)
         results.append(
             {
@@ -393,6 +400,7 @@ def sft_microbatch_train_step(
 
 
 def log_generations(
+    eval_data_name: str,
     tokenizer: PreTrainedTokenizer,
     model_vllm: LLM,
     model: PreTrainedModel,
@@ -420,6 +428,7 @@ def log_generations(
     reward_fn = r1_zero_reward_fn if reward == "r1_zero" else question_only_reward_fn
     timestamp_str, results = evaluate_vllm(
         vllm_model=model_vllm,
+        eval_data_name=eval_data_name,
         reward_fn=reward_fn,
         prompts=prompts,
         eval_sampling_params=sampling_params,

@@ -1,17 +1,28 @@
 import os
 import torch
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Literal, Tuple
+from typing import Optional, Dict, List, Literal, Tuple
 
 
 @dataclass
 class GRPOConfig:
+    # Data paths
+    data_path_dict = {
+        "MATH": {
+            "train": ["data/MATH/train.jsonl"],
+            "sft": "data/MATH/sft.jsonl",
+            "eval": ["data/MATH/validation.jsonl"]
+        },
+        "gsm8k": {"train": ["data/gsm8k/train.jsonl"],
+                  "eval": ["data/gsm8k/train.jsonl", "data/gsm8k/test.jsonl"]}
+    }
+
     # Model and data parameters
     model_path: Optional[str] = field(default="models/models--Qwen--Qwen2.5-Math-1.5B/snapshots/4a83ca6e4526a4f2da3aa259ec36c259f66b2ab2/")
     train_dtype: torch.dtype = field(default=torch.bfloat16)
-    data_train_path: Optional[str] = field(default="data/MATH/train.jsonl")
+    train_data_name: Optional[str] = field(default="MATH")
+    eval_data_names: Optional[List[str]] = field(default_factory=lambda: ["MATH"])
     data_sft_path: Optional[str] = field(default="data/MATH/sft.jsonl")
-    data_eval_path: Optional[str] = field(default="data/MATH/validation.jsonl")
     prompt: Optional[str] = field(default="r1_zero")
     
     # Device parameters
@@ -97,3 +108,5 @@ class GRPOConfig:
 
         self.grpo_start_from = 0 if self.do_eval_before_train else 1
         self.lr_scheduler_kwargs: Dict[str, float] = {"min_lr_rate": self.lr_scheduler_min_rate}
+
+        self.data_train_path = self.data_path_dict[self.train_data_name]["train"]

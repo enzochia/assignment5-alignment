@@ -6,6 +6,8 @@ from .utils import (
     compute_policy_gradient_loss,
     masked_mean,
     grpo_microbatch_train_step,
+    evaluate_model,
+    get_eval_data,
     train_grpo
 )
 
@@ -18,5 +20,7 @@ __all__ = [
     "compute_policy_gradient_loss",
     "masked_mean",
     "grpo_microbatch_train_step",
+    "evaluate_model",
+    "get_eval_data",
     "train_grpo"
 ]
