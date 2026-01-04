@@ -13,10 +13,7 @@ from transformers import (
 from vllm import SamplingParams
 from .configs import SFTConfig
 from torch.utils.data import DataLoader
-from cs336_alignment.data_util import (
-    MATH_SFT_Dataset,
-    collate_fn_sft
-)
+from cs336_alignment.data_util import Train_Dataset
 from cs336_alignment.utils import (
     set_random_seed,
     load_prompt_template,
@@ -28,6 +25,10 @@ from cs336_alignment.utils import (
     get_response_log_probs,
     log_generations,
     get_grad_norm
+)
+from cs336_alignment.grpo import (
+    evaluate_model,
+    get_eval_data
 )
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -54,21 +55,18 @@ def run_sft(
         tokenizer.pad_token = tokenizer.eos_token
 
     logging.info(f"Loading and processing train dataset.")
-    train_data = MATH_SFT_Dataset(configs.data_sft_path)
+    train_data = Train_Dataset(configs=configs, train="sft")
     train_dataloader = DataLoader(
         train_data,
         batch_size=configs.batch_size // configs.gradient_accumulation_steps,
         shuffle=True,
-        collate_fn=collate_fn_sft
+        collate_fn=train_data.collate_fn_sft
     )
     micro_steps_per_epoch = len(train_dataloader)
     microbatch_size = configs.batch_size // configs.gradient_accumulation_steps
     print(f"length of train_data: {len(train_data)}, length of train_dataloader: {len(train_dataloader)}.")
 
-    logging.info(f"Loading and processing eval dataset.")
-    eval_questions, eval_answers = load_eval_data("MATH", configs.data_eval_path)
-    prompt_template = load_prompt_template(configs.prompt_template_path)
-    eval_prompts = [prompt_template.format(question=question) for question in eval_questions]
+    eval_prompts, eval_answers = get_eval_data(configs)
 
     logging.info(f"Initializing optimizer and lr scheduler.")
     optimizer = AdamW(model.parameters(), lr=configs.lr)
@@ -80,53 +78,32 @@ def run_sft(
         scheduler_specific_kwargs=configs.lr_scheduler_kwargs
     )
 
-    if configs.do_eval:
-        logging.info(f"Initializing eval model.")
-        model_eval = init_vllm(
-            model=configs.model_path,
-            device=configs.eval_device,
-            gpu_memory_utilization=configs.gpu_memory_utilization if configs.train_device == configs.eval_device else 0.9,
-            dtype=configs.train_dtype,
-            seed=configs.seed
-        )
-        eval_sampling_params = SamplingParams(
-            temperature=configs.temperature,
-            top_p=configs.top_p,
-            max_tokens=configs.max_tokens,
-            stop=["</answer>"],
-            include_stop_str_in_output=True
-        )
+    model_eval = init_vllm(
+        model=configs.model_path,
+        device=configs.eval_device,
+        gpu_memory_utilization=configs.gpu_memory_utilization if configs.train_device == configs.eval_device else 0.9,
+        dtype=configs.train_dtype,
+        seed=configs.seed
+    )
+    sampling_params_eval = SamplingParams(
+        temperature=configs.temperature,
+        top_p=configs.top_p,
+        max_tokens=configs.max_tokens,
+        stop=["</answer>"],
+        include_stop_str_in_output=True
+    )
 
-        eval_results = log_generations(
+    if configs.do_eval:
+        evaluate_model(
+            configs=configs,
             tokenizer=tokenizer,
-            model_vllm=model_eval,
             model=model,
-            prompts=eval_prompts,
-            answers=eval_answers,
-            step=0,
-            run_name=configs.wandb_run_name,
-            sampling_params=eval_sampling_params,
-            log_to=configs.log_dir,
-            device=configs.train_device, # this may be wrong
-            reward=configs.prompt,
-            temperature=1.0,
-            top_p=1.0,
-            max_tokens=1024,
-            eval_batch_size= configs.eval_batch_size # lower it if OOM
+            model_inf=model_eval,
+            eval_prompts=eval_prompts,
+            eval_answers=eval_answers,
+            step_count=0,
+            sampling_params_eval=sampling_params_eval
         )
-        logging.info(f"Eval metric results:")
-        logging.info(eval_results)
-        wandb.log({
-            "eval/format_reward": eval_results["count_correct_format"] / eval_results["eval_sample_size"],
-            "eval/answer_reward": eval_results["count_correct_answer"] / eval_results["eval_sample_size"],
-            "eval/total_reward": eval_results["total_reward"] / eval_results["eval_sample_size"],
-            "eval/avg_token_entropy": eval_results["avg_token_entropy"],
-            "eval/avg_response_len": eval_results["avg_response_len"],
-            "eval/avg_correct_response_len": eval_results["avg_correct_response_len"],
-            "eval/avg_incorrect_response_len": eval_results["avg_incorrect_response_len"]
-        }, step=0)
-    else:
-        model_eval = None
 
     model.train()
     total_microstep_count = -1
@@ -195,49 +172,22 @@ def run_sft(
             loss_batch = 0
 
         if configs.do_eval:
-            logging.info(f"Evaluating...")
             load_policy_into_vllm_instance(model, model_eval)
-            eval_results = log_generations(
+            evaluate_model(
+                configs=configs,
                 tokenizer=tokenizer,
-                model_vllm=model_eval,
                 model=model,
-                prompts=eval_prompts,
-                answers=eval_answers,
-                step=total_microstep_count // configs.gradient_accumulation_steps,
-                run_name=configs.wandb_run_name,
-                sampling_params=eval_sampling_params,
-                log_to=configs.log_dir,
-                device=configs.train_device, # this may be wrong
-                reward=configs.prompt,
-                temperature=1.0,
-                top_p=1.0,
-                max_tokens=1024,
-                eval_batch_size= configs.eval_batch_size # lower it if OOM
+                model_inf=model_eval,
+                eval_prompts=eval_prompts,
+                eval_answers=eval_answers,
+                step_count=total_microstep_count,
+                sampling_params_eval=sampling_params_eval
             )
-            logging.info(f"Eval metric results:")
-            logging.info(eval_results)
-            wandb.log({
-                "eval/format_reward": eval_results["count_correct_format"] / eval_results["eval_sample_size"],
-                "eval/answer_reward": eval_results["count_correct_answer"] / eval_results["eval_sample_size"],
-                "eval/total_reward": eval_results["total_reward"] / eval_results["eval_sample_size"],
-                "eval/avg_token_entropy": eval_results["avg_token_entropy"],
-                "eval/avg_response_len": eval_results["avg_response_len"],
-                "eval/avg_correct_response_len": eval_results["avg_correct_response_len"],
-                "eval/avg_incorrect_response_len": eval_results["avg_incorrect_response_len"]
-            }, step=total_microstep_count)
     
-        if configs.checkpoint_dir is not None:
+        if ((configs.checkpoint_dir is not None) and
+            (epoch < configs.keep_ckpt_until_epoch)):
             step = (total_microstep_count + 1) // configs.gradient_accumulation_steps
             ckpt_path = os.path.join(configs.checkpoint_dir, f"{configs.wandb_run_name}/ckpt_epoch_{epoch}_{step}steps")
             logging.info(f"Saving trained checkpoint to {ckpt_path}")
             model.save_pretrained(ckpt_path)
             tokenizer.save_pretrained(ckpt_path)
-
-"""
-"""
-
-
-
-
-
-    

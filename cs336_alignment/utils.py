@@ -483,7 +483,8 @@ def log_generations(
         "avg_incorrect_response_len": avg_incorrect_response_len.item()
     }
     if log_to is not None:
-        log_to = os.path.join(log_to, f"{run_name}")
+        timestamp_str = datetime.datetime.now().strftime("%Y%m%d-%H%M")
+        log_to = os.path.join(log_to, f"run_{timestamp_str}_{run_name}")
         metric_path = os.path.join(log_to, f"eval_metrics_step_{step}.json")
         if not os.path.exists(log_to):
             os.makedirs(log_to)

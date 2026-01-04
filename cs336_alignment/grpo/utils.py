@@ -27,6 +27,7 @@ from cs336_alignment.drgrpo_grader import (
 )
 from cs336_alignment.data_util import Train_Dataset
 from .configs import GRPOConfig
+from cs336_alignment.sft.configs import SFTConfig
 from itertools import cycle, islice
 from tqdm import tqdm
 import wandb
@@ -425,7 +426,7 @@ def infinite_dataloader(loader):
             yield batch
 
 def evaluate_model(
-    configs: GRPOConfig,
+    configs: GRPOConfig | SFTConfig,
     tokenizer: AutoTokenizer,
     model: torch.nn.Module,
     model_inf: torch.nn.Module,
@@ -471,7 +472,7 @@ def evaluate_model(
         model.train()
 
 def get_eval_data(
-    configs: GRPOConfig
+    configs: GRPOConfig | SFTConfig
 ):
     eval_prompts: Dict[str, List[str]] = {}
     eval_answers: Dict[str, List[str]] = {}

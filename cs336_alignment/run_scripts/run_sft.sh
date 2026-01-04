@@ -1,12 +1,14 @@
 uv run --active -m cs336_alignment.sft.run_sft \
   --model_path models/bf16/models--Qwen--Qwen2.5-Math-1.5B/snapshots/4a83ca6e4526a4f2da3aa259ec36c259f66b2ab2/ \
-  --data_sft_path data/MATH/sft.jsonl \
-  --data_eval_path data/MATH/validation.jsonl \
+  --train_data_name MATH \
+  --sft_data_name MATH \
+  --eval_data_names gsm8k MATH \
   --prompt r1_zero \
   --train_device cuda:0 \
   --eval_device cuda:0 \
-  --checkpoint_dir outputs/ckpt/ \
-  --log_dir outputs/logs/ \
+  --checkpoint_dir outputs/sft/ckpt/ \
+  --keep_ckpt_until_epoch 3 \
+  --log_dir outputs/sft/logs/ \
   --lr_scheduler cosine_with_min_lr \
   --lr 0.00004 \
   --batch_size 256 \
@@ -15,5 +17,5 @@ uv run --active -m cs336_alignment.sft.run_sft \
   --gpu_memory_utilization 0.275 \
   --do_eval \
   --eval_batch_size 8 \
-  --wandb_project SFT-Qwen2.5-Math-1.5B-dev \
-  --wandb_run_name sft_dev_run_bs256_lr4e-5
+  --wandb_project SFT-Qwen2.5-Math-1.5B-test \
+  --wandb_run_name sft_bs256_lr4e-5

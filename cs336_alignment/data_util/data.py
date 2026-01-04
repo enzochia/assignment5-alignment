@@ -1,18 +1,26 @@
 import os
 import json
 from torch.utils.data import Dataset
-from cs336_alignment.grpo.configs import GRPOConfig
+# from cs336_alignment.grpo import GRPOConfig
+# from cs336_alignment.sft.configs import SFTConfig
 
 
 class Train_Dataset(Dataset):
     def __init__(
         self,
-        configs: GRPOConfig,
+        configs,
+        train: str = "grpo"
     ):
+    # TODO: if import the config classes there would be circular imports. fix it.
         super().__init__()
         self.configs = configs
         self.data = []
-        for path in configs.data_train_path:
+        paths = None
+        if train == "grpo":
+            paths = configs.data_train_path
+        elif train == "sft":
+            paths = configs.data_sft_path
+        for path in paths:
             with open(path, "r") as f:
                 for line in f:
                     self.data.append(json.loads(line))
@@ -25,7 +33,7 @@ class Train_Dataset(Dataset):
         return self.data[idx]
 
     def collate_fn_sft(self, batch):
-        if self.configs.train_data_name == "MATH":
+        if self.configs.sft_data_name == "MATH":
             prompts = [item["prompt"] for item in batch]
             outputs = [item["response"] for item in batch]
             answers = [item["ground_truth"] for item in batch]

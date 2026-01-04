@@ -1,17 +1,28 @@
 import os
 import torch
 from dataclasses import dataclass, field
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 
 
 @dataclass
 class SFTConfig:
+    # Data paths
+    data_path_dict = {
+        "MATH": {
+            "train": ["data/MATH/train.jsonl"],
+            "sft": ["data/MATH/sft.jsonl"],
+            "eval": ["data/MATH/validation.jsonl"]
+        },
+        "gsm8k": {"train": ["data/gsm8k/train.jsonl"],
+                  "eval": ["data/gsm8k/train.jsonl", "data/gsm8k/test.jsonl"]}
+    }
+
     # Model and data parameters
     model_path: Optional[str] = field(default="models/models--Qwen--Qwen2.5-Math-1.5B/snapshots/4a83ca6e4526a4f2da3aa259ec36c259f66b2ab2/")
     train_dtype: torch.dtype = field(default=torch.bfloat16)
-    data_train_path: Optional[str] = field(default="data/MATH/train.jsonl")
-    data_sft_path: Optional[str] = field(default="data/MATH/sft.jsonl")
-    data_eval_path: Optional[str] = field(default="data/MATH/validation.jsonl")
+    train_data_name: Optional[str] = field(default="MATH")
+    sft_data_name: Optional[str] = field(default="MATH")
+    eval_data_names: Optional[List[str]] = field(default_factory=lambda: ["MATH"])
     prompt: Optional[str] = field(default="r1_zero")
     
     # Device parameters
@@ -21,8 +32,9 @@ class SFTConfig:
     eval_device: str = field(default = "cuda:1")
 
     # Training parameters
-    checkpoint_dir: str = field(default = "outputs/ckpt/")
-    log_dir: str = field(default = "outputs/logs/")
+    checkpoint_dir: str = field(default = "outputs/sft/ckpt/")
+    keep_ckpt_until_epoch: int = field(default = 3)
+    log_dir: str = field(default = "outputs/sft/logs/")
     seed: int = field(default = 2048)
     lr_scheduler: str = field(default = "cosine_with_min_lr")
     lr: float = field(default = 4e-5)
@@ -55,3 +67,8 @@ class SFTConfig:
                             "question_only": "cs336_alignment/prompts/question_only.prompt"}
         assert self.prompt in prompt_template_path_dict
         self.prompt_template_path = prompt_template_path_dict[self.prompt]
+        self.data_train_path = self.data_path_dict[self.train_data_name]["train"]
+        self.data_sft_path = self.data_path_dict[self.sft_data_name]["sft"]
+        self.data_eval_path = []
+        for eval_data_name in self.eval_data_names:
+            self.data_eval_path.extend(self.data_path_dict[eval_data_name]["eval"])
