@@ -448,6 +448,7 @@ def evaluate_model(
             prompts=eval_prompts[eval_data_name],
             answers=eval_answers[eval_data_name],
             step=step_count,
+            project=configs.wandb_project,
             run_name=configs.wandb_run_name,
             sampling_params=sampling_params_eval,
             log_to=configs.log_dir,
@@ -532,12 +533,12 @@ def train_grpo(
         betas=configs.betas
     )
     # assuming configs.n_grpo_steps % configs.n_train_steps_per_rollout_batch == 0
-    total_rollout_size = configs.n_grpo_steps * configs.rollout_batch_size // configs.n_train_steps_per_rollout_batch
+    total_rollout_size = configs.n_grpo_steps * configs.rollout_batch_size 
     # each rollout is reused configs.n_train_steps_per_rollout_batch times
-    total_train_size = configs.n_grpo_steps * configs.rollout_batch_size
+    total_train_size = total_rollout_size * configs.n_train_steps_per_rollout_batch
     total_optim_steps = total_train_size // configs.train_batch_size
     # there could be multiple rollout batches per optim step which takes one train batch of data
-    total_rollouts = total_rollout_size // configs.rollout_batch_size
+    total_rollouts = configs.n_grpo_steps
     logging.info(f"Total training size: {total_train_size}, total optim steps: {total_optim_steps}, total rollout data size: "
                  f"{total_rollout_size}, total rollouts: {total_rollouts}.")
     lr_scheduler = get_scheduler(

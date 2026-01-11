@@ -187,7 +187,7 @@ def run_sft(
         if ((configs.checkpoint_dir is not None) and
             (epoch < configs.keep_ckpt_until_epoch)):
             step = (total_microstep_count + 1) // configs.gradient_accumulation_steps
-            ckpt_path = os.path.join(configs.checkpoint_dir, f"{configs.wandb_run_name}/ckpt_epoch_{epoch}_{step}steps")
+            ckpt_path = os.path.join(configs.checkpoint_dir, f"{configs.wandb_project}_{configs.wandb_run_name}/ckpt_epoch_{epoch}_{step}steps")
             logging.info(f"Saving trained checkpoint to {ckpt_path}")
             model.save_pretrained(ckpt_path)
             tokenizer.save_pretrained(ckpt_path)
